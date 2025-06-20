@@ -2,3 +2,5 @@ Flask
 gunicorn
 supabase
 python-dotenv
+efipay
+certifi
