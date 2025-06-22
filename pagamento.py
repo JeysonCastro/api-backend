@@ -1,70 +1,77 @@
-# No seu arquivo utils/pagamento.py
+# -------------------------------------------------------------------
+# ARQUIVO: utils/pagamento.py (Versão Final e Oficial)
+# DESCRIÇÃO: Este arquivo contém a lógica "pura" para se comunicar com a API da Efí.
+# Ele é projetado para rodar no seu servidor (backend) e não contém
+# nenhuma dependência da interface gráfica (Kivy/KivyMD).
+# -------------------------------------------------------------------
 
-# --- Imports Essenciais (SEM KIVY) ---
+# --- Imports Essenciais ---
 import os
 import certifi 
 from efipay import EfiPay
 from typing import Tuple, Optional, Dict, Any
 
 # --- Configuração da API Efí ---
-# Agora, o caminho para o certificado é simples. Ele assume que o arquivo
-# 'producao_cert.pem' está nesta mesma pasta 'utils'.
+# Este caminho assume que o certificado está na mesma pasta 'utils' que este script.
+# No servidor, você deve garantir que a estrutura de pastas seja a mesma.
 certificado_path = os.path.join(os.path.dirname(__file__), 'producao_cert.pem')
 
-# Dicionário de configuração UNIFICADO
-# Lembre-se de preencher com suas chaves reais de produção.
-# Essas chaves devem ser configuradas como variáveis de ambiente no seu servidor.
+# Dicionário de configuração UNIFICADO.
+# Ele busca as chaves das variáveis de ambiente do seu servidor.
 config = {
     'client_id': os.environ.get('EFI_CLIENT_ID'),
     'client_secret': os.environ.get('EFI_CLIENT_SECRET'),
     'sandbox': False,
     'certificate': certificado_path,
-    'verify_ssl': certifi.where() # A chave correta é 'verify_ssl'
+    # A chave correta que a biblioteca 'requests' usa para verificação SSL
+    'verify_ssl': certifi.where() 
 }
 
 
-# --- FUNÇÃO GERAR_PIX - PURA ---
-def gerar_pix(valor_centavos: int, nome_cliente: str, cpf_cliente: str) -> Tuple[Optional[str], Optional[str]]:
+# --- FUNÇÃO GERAR_PIX - VERSÃO OFICIAL ---
+def gerar_pix(valor_centavos: int, nome_cliente: str, cpf_cliente: str) -> Optional[Dict[str, Any]]:
+    """
+    Gera uma cobrança PIX e retorna um dicionário com todos os dados, incluindo o txid.
+    """
     try:
-        # A inicialização agora usa o 'config' unificado
         api = EfiPay(config)
-
         body = {
             "calendario": {"expiracao": 3600},
-            "devedor": {
-                "nome": nome_cliente,
-                "cpf": cpf_cliente
-            },
-            "valor": {
-                "original": f"{valor_centavos / 100:.2f}"
-            },
-            "chave": "SUA_CHAVE_PIX_CADASTRADA_NA_EFI",
+            "devedor": {"nome": nome_cliente, "cpf": cpf_cliente},
+            "valor": {"original": f"{valor_centavos / 100:.2f}"},
+            "chave": "SUA_CHAVE_PIX_CADASTRADA_NA_EFI", # Substitua pela sua chave Pix
             "solicitacaoPagador": "Pagamento de locação de ar-condicionado"
         }
 
-        response = api.pix_create_immediate_charge(body=body)
+        response_cobranca = api.pix_create_immediate_charge(body=body)
+        if "loc" not in response_cobranca:
+            raise Exception(f"Erro ao criar cobrança PIX: {response_cobranca}")
 
-        if "loc" not in response:
-            print("Erro: resposta da Efipay não contém 'loc'. Resposta:", response)
-            return None, None
+        loc_id = response_cobranca["loc"]["id"]
+        response_qrcode = api.pix_generate_qrcode(params={"id": loc_id})
 
-        loc_id = response["loc"]["id"]
-        qr_code = api.pix_generate_qrcode(params={"id": loc_id})
-        return qr_code.get("imagemQrcode"), qr_code.get("qrcode")
+        # Monta um dicionário completo para retornar para a sua api.py
+        resultado_final = {
+            "txid": response_cobranca.get("txid"),
+            "imagemQrcode": response_qrcode.get("imagemQrcode"),
+            "qrcode": response_qrcode.get("qrcode")
+        }
+        return resultado_final
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        print(f"Erro detalhado ao gerar Pix: {e}")
-        return None, None
+        print(f"Erro detalhado na função gerar_pix: {e}")
+        return None
 
 
-# --- FUNÇÃO GERAR LINK DE CARTÃO - PURA ---
+# --- FUNÇÃO GERAR LINK DE CARTÃO - VERSÃO OFICIAL ---
 def gerar_cobranca_link_cartao(dados_cobranca: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Cria uma cobrança do tipo 'Link de Pagamento' na Efí para cartão de crédito.
+    """
     try:
-        # A inicialização agora usa o 'config' unificado
         api = EfiPay(config)
-
         valor = dados_cobranca.get("valor_centavos", 1000)
         nome_item = dados_cobranca.get("nome_item", "Serviço de Locação")
 
@@ -74,7 +81,9 @@ def gerar_cobranca_link_cartao(dados_cobranca: Dict[str, Any]) -> Optional[Dict[
                 "value": valor,
                 "amount": 1
             }],
-            "settings": {"payment_method": "credit_card"}
+            "settings": {
+                "payment_method": "credit_card" 
+            }
         }
         
         response = api.create_one_step_link(body=body)
@@ -87,4 +96,3 @@ def gerar_cobranca_link_cartao(dados_cobranca: Dict[str, Any]) -> Optional[Dict[
         traceback.print_exc()
         print(f"Erro detalhado ao gerar link de pagamento: {e}")
         return None
-
