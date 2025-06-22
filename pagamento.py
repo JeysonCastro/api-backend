@@ -14,23 +14,20 @@ certificado_path = os.path.join(os.path.dirname(__file__), 'producao_cert.pem')
 # Dicionário de configuração UNIFICADO
 # Lembre-se de preencher com suas chaves reais de produção.
 # Essas chaves devem ser configuradas como variáveis de ambiente no seu servidor.
-credentials = {
-    'client_id': os.environ.get('EFI_CLIENT_ID', 'SEU_CLIENT_ID_PADRAO'),
-    'client_secret': os.environ.get('EFI_CLIENT_SECRET', 'SEU_CLIENT_SECRET_PADRAO'),
+config = {
+    'client_id': os.environ.get('EFI_CLIENT_ID'),
+    'client_secret': os.environ.get('EFI_CLIENT_SECRET'),
     'sandbox': False,
     'certificate': certificado_path,
+    'verify_ssl': certifi.where() # A chave correta é 'verify_ssl'
 }
 
 
 # --- FUNÇÃO GERAR_PIX - PURA ---
 def gerar_pix(valor_centavos: int, nome_cliente: str, cpf_cliente: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Gera uma cobrança PIX. Não depende mais do Kivy ou do App.
-    """
     try:
-        # A inicialização agora é limpa, usando o dicionário 'config'
-        # e forçando a verificação SSL com o certifi.
-        api = EfiPay(credentials, options={'verify': certifi.where()})
+        # A inicialização agora usa o 'config' unificado
+        api = EfiPay(config)
 
         body = {
             "calendario": {"expiracao": 3600},
@@ -64,11 +61,9 @@ def gerar_pix(valor_centavos: int, nome_cliente: str, cpf_cliente: str) -> Tuple
 
 # --- FUNÇÃO GERAR LINK DE CARTÃO - PURA ---
 def gerar_cobranca_link_cartao(dados_cobranca: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Cria um link de pagamento para cartão de crédito. Não depende do Kivy.
-    """
     try:
-        api = EfiPay(credentials, options={'verify': certifi.where()})
+        # A inicialização agora usa o 'config' unificado
+        api = EfiPay(config)
 
         valor = dados_cobranca.get("valor_centavos", 1000)
         nome_item = dados_cobranca.get("nome_item", "Serviço de Locação")
