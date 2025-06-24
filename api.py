@@ -73,8 +73,17 @@ def gerar_cobranca_link_cartao(dados_cobranca: Dict[str, Any]) -> Optional[Dict[
     try:
         api = EfiPay(efi_config)
         body = {
-            "items": [{"name": dados_cobranca.get("nome_item", "Serviço de Locação"), "value": dados_cobranca.get("valor_centavos", 1000), "amount": 1}],
-            "settings": {"payment_method": "credit_card"}
+            "items": [{
+                "name": nome_item,
+                "value": valor,
+                "amount": 1
+            }],
+            "settings": {
+                "payment_method": "credit_card",
+                # Adicionamos a propriedade obrigatória. False significa que
+                # a Efí NÃO vai pedir o endereço de entrega na página de pagamento.
+                "request_delivery_address": False
+            }
         }
         response = api.create_one_step_link(body=body)
         return response
