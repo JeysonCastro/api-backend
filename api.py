@@ -49,7 +49,7 @@ def gerar_pix(valor_centavos: int, nome_cliente: str, cpf_cliente: str) -> Optio
             "calendario": {"expiracao": 3600},
             "devedor": {"nome": nome_cliente, "cpf": cpf_cliente},
             "valor": {"original": f"{valor_centavos / 100:.2f}"},
-            "chave": "SUA_CHAVE_PIX_AQUI", # SUBSTITUA PELA SUA CHAVE PIX
+            "chave": "os.environ.get("EFI_PIX_CHAVE"), # SUBSTITUA PELA SUA CHAVE PIX
             "solicitacaoPagador": "Pagamento de locação de ar-condicionado"
         }
         response_cobranca = api.pix_create_immediate_charge(body=body)
