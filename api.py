@@ -77,7 +77,7 @@ def gerar_cobranca_link_cartao(dados_cobranca: Dict[str, Any]) -> Optional[Dict[
         valor = dados_cobranca.get("valor_centavos", 1000)
         nome_item = dados_cobranca.get("nome_item", "Serviço de Locação")
 
-        expire_at = (datetime.utcnow() + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        expire_at = (datetime.utcnow() + timedelta(days=1)).strftime('%Y-%m-%d')
         
         body = {
             "items": [{
