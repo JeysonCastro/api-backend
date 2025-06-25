@@ -72,6 +72,10 @@ def gerar_cobranca_link_cartao(dados_cobranca: Dict[str, Any]) -> Optional[Dict[
     """ Cria um link de pagamento para cartão de crédito. """
     try:
         api = EfiPay(efi_config)
+
+        valor = dados_cobranca.get("valor_centavos", 1000)
+        nome_item = dados_cobranca.get("nome_item", "Serviço de Locação")
+        
         body = {
             "items": [{
                 "name": nome_item,
