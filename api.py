@@ -139,10 +139,11 @@ def criar_link_cartao_endpoint():
     dados_cobranca = request.get_json()
     try:
         resposta_efi = gerar_cobranca_link_cartao(dados_cobranca)
-        if not resposta_efi or 'data' not in resposta_efi or 'link' not in resposta_efi['data']:
+        if not resposta_efi or 'data' not in resposta_efi or 'payment_url' not in resposta_efi['data']:
             raise Exception(f"Erro da API Efí ao gerar link: {resposta_efi}")
+
+        link_pagamento = resposta_efi['data']['payment_url']
             
-        link_pagamento = resposta_efi['data']['link']
         return jsonify({"payment_url": link_pagamento})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
