@@ -8,6 +8,7 @@ from supabase import create_client, Client
 import certifi 
 from efipay import EfiPay
 from typing import Optional, Dict, Any
+from datetime import datetime, timedelta
 
 # --- 1. Configuração Centralizada ---
 
@@ -75,6 +76,8 @@ def gerar_cobranca_link_cartao(dados_cobranca: Dict[str, Any]) -> Optional[Dict[
 
         valor = dados_cobranca.get("valor_centavos", 1000)
         nome_item = dados_cobranca.get("nome_item", "Serviço de Locação")
+
+        expire_at = (datetime.utcnow() + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
         
         body = {
             "items": [{
@@ -86,7 +89,8 @@ def gerar_cobranca_link_cartao(dados_cobranca: Dict[str, Any]) -> Optional[Dict[
                 "payment_method": "credit_card",
                 # Adicionamos a propriedade obrigatória. False significa que
                 # a Efí NÃO vai pedir o endereço de entrega na página de pagamento.
-                "request_delivery_address": False
+                "request_delivery_address": False,
+                "expire_at": expire_at
             }
         }
         response = api.create_one_step_link(body=body)
