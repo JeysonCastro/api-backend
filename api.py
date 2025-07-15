@@ -161,9 +161,11 @@ def webhook_efi():
         
         notificacao = json.loads(notificacao_bytes)
         if 'pix' in notificacao:
-            txid = notificacao['pix'][0]['txid']
-            supabase.table('instalacoes').update({'status': 'PAGO'}).eq('txid_efi', txid).execute()
-            print(f"Instalação com txid {txid} atualizada para PAGO.")
+            info_pix = notificacao['pix'][0]
+            if info_pix.get('status') == 'CONCLUIDA':
+                txid = info_pix['txid']
+                supabase.table('instalacoes').update({'status': 'PAGO'}).eq('txid_efi', txid).execute()
+                print(f"✅ Instalação com txid {txid} atualizada para PAGO.")
     except Exception as e:
         print(f"!!! Erro ao processar o webhook: {e}")
     return jsonify(status="recebido"), 200
