@@ -1,4 +1,4 @@
-# --- Imports Essenciais ---
+
 import os
 import hmac
 import hashlib
@@ -10,7 +10,7 @@ from efipay import EfiPay
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 
-# --- 1. Configuração Centralizada ---
+
 
 # Carrega as credenciais seguras das Variáveis de Ambiente do servidor
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -39,7 +39,7 @@ except Exception as e:
     print(f"ERRO CRÍTICO ao inicializar os serviços: {e}")
 
 
-# --- 2. Funções de Lógica de Pagamento ---
+
 # Estas funções agora vivem dentro do mesmo arquivo da API para simplicidade.
 
 def gerar_pix(valor_centavos: int, nome_cliente: str, cpf_cliente: str) -> Optional[Dict[str, Any]]:
@@ -100,7 +100,7 @@ def gerar_cobranca_link_cartao(dados_cobranca: Dict[str, Any]) -> Optional[Dict[
         return None
 
 
-# --- 3. Endpoints (Rotas) da API ---
+
 
 @app.route('/')
 def index():
