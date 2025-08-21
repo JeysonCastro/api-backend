@@ -2,5 +2,6 @@ Flask
 gunicorn
 supabase
 python-dotenv
-efipay
+mercadopago
 certifi
+
