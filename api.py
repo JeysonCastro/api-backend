@@ -1,179 +1,307 @@
+# app.py  — versão Mercado Pago (PIX + Cartão) para sua VM atual
 
 import os
-import hmac
-import hashlib
 import json
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any
+
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
-import certifi 
-from efipay import EfiPay
-from typing import Optional, Dict, Any
-from datetime import datetime, timedelta
+import certifi
+import mercadopago
 
-
-
-# Carrega as credenciais seguras das Variáveis de Ambiente do servidor
+# ---------------------------
+# Variáveis de ambiente
+# ---------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-EFI_CLIENT_ID = os.environ.get("EFI_CLIENT_ID")
-EFI_CLIENT_SECRET = os.environ.get("EFI_CLIENT_SECRET")
+MP_ACCESS_TOKEN = os.environ.get("MP_ACCESS_TOKEN")
+MP_PUBLIC_KEY = os.environ.get("MP_PUBLIC_KEY")
 
-# Configuração para a API da Efí Pay
-# Assume que 'producao_cert.pem' está na mesma pasta que este script
-certificado_path = os.path.join(os.path.dirname(__file__), 'producao_cert.pem')
-
-efi_config = {
-    'client_id': EFI_CLIENT_ID,
-    'client_secret': EFI_CLIENT_SECRET,
-    'sandbox': False,
-    'certificate': certificado_path,
-    # Força o uso do pacote 'certifi' para garantir a validação SSL
-    'verify_ssl': certifi.where() 
-}
-
-# Inicialização dos clientes
+# ---------------------------
+# Inicializações
+# ---------------------------
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     app = Flask(__name__)
+    sdk = mercadopago.SDK(MP_ACCESS_TOKEN)
 except Exception as e:
-    print(f"ERRO CRÍTICO ao inicializar os serviços: {e}")
+    print(f"ERRO CRÍTICO ao inicializar serviços: {e}")
+    raise
 
+# ---------------------------
+# Helpers
+# ---------------------------
 
+def _ensure_data_uri_png(b64_str: str) -> str:
+    """Garante prefixo data URI para imagens base64."""
+    if not b64_str:
+        return ""
+    if not b64_str.startswith("data:image"):
+        return f"data:image/png;base64,{b64_str}"
+    return b64_str
 
-# Estas funções agora vivem dentro do mesmo arquivo da API para simplicidade.
+# ---------------------------
+# Mercado Pago: PIX
+# ---------------------------
 
-def gerar_pix(valor_centavos: int, nome_cliente: str, cpf_cliente: str) -> Optional[Dict[str, Any]]:
-    """ Gera uma cobrança PIX e retorna um dicionário com todos os dados. """
+def gerar_pix_mp(valor_centavos: int, email_cliente: str, nome_cliente: Optional[str] = None,
+                 cpf_cliente: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Cria um pagamento PIX (Payment API) e retorna os dados do QR Code.
+    """
     try:
-        api = EfiPay(efi_config)
-        body = {
-            "calendario": {"expiracao": 3600},
-            "devedor": {"nome": nome_cliente, "cpf": cpf_cliente},
-            "valor": {"original": f"{valor_centavos / 100:.2f}"},
-            "chave": os.environ.get("EFI_PIX_CHAVE"), # SUBSTITUA PELA SUA CHAVE PIX
-            "solicitacaoPagador": "Pagamento de locação de ar-condicionado"
-        }
-        response_cobranca = api.pix_create_immediate_charge(body=body)
-        if "loc" not in response_cobranca:
-            raise Exception(f"Erro ao criar cobrança PIX: {response_cobranca}")
+        valor = round(valor_centavos / 100.0, 2)
 
-        loc_id = response_cobranca["loc"]["id"]
-        response_qrcode = api.pix_generate_qrcode(params={"id": loc_id})
+        payer: Dict[str, Any] = {"email": email_cliente}
+        if nome_cliente:
+            payer["first_name"] = nome_cliente
+        if cpf_cliente:
+            payer["identification"] = {"type": "CPF", "number": cpf_cliente}
+
+        pagamento = sdk.payment().create({
+            "transaction_amount": valor,
+            "description": "Pagamento Casa do Ar",
+            "payment_method_id": "pix",
+            "payer": payer
+        })
+
+        resp = pagamento["response"]
+        # Campos importantes:
+        # - resp["id"]: id do pagamento (usar como "txid" interno)
+        # - resp["status"]: 'pending' até ser pago
+        # - resp["point_of_interaction"]["transaction_data"]["qr_code"]
+        # - resp["point_of_interaction"]["transaction_data"]["qr_code_base64"]
+        poi = resp.get("point_of_interaction", {}) or {}
+        txdata = poi.get("transaction_data", {}) or {}
 
         return {
-            "txid": response_cobranca.get("txid"),
-            "imagemQrcode": response_qrcode.get("imagemQrcode"),
-            "qrcode": response_qrcode.get("qrcode")
+            "payment_id": resp.get("id"),
+            "status": resp.get("status"),
+            "qr_code": txdata.get("qr_code"),
+            "qr_code_base64": _ensure_data_uri_png(txdata.get("qr_code_base64", "")),
         }
     except Exception as e:
-        print(f"Erro detalhado na função gerar_pix: {e}")
+        print(f"[MP][PIX] Erro: {e}")
         return None
 
-def gerar_cobranca_link_cartao(dados_cobranca: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """ Cria um link de pagamento para cartão de crédito. """
+# ---------------------------
+# Mercado Pago: Cartão (Checkout Pro via Preference)
+# ---------------------------
+
+def gerar_preferencia_cartao_mp(valor_centavos: int, email_cliente: str,
+                                titulo_item: str = "Pagamento Casa do Ar") -> Optional[Dict[str, Any]]:
+    """
+    Gera uma preferência do Checkout Pro com método de pagamento limitado a CARTÃO.
+    Retorna a URL (init_point) para redirecionamento em WebView/navegador.
+    """
     try:
-        api = EfiPay(efi_config)
+        valor = round(valor_centavos / 100.0, 2)
+        # Limitando a cartão de crédito (exclui pix e boleto)
+        payment_methods = {
+            "excluded_payment_methods": [{"id": "pix"}, {"id": "bolbradesco"}],
+            "excluded_payment_types": [{"id": "ticket"}],  # exclui boleto
+            "installments": 12
+        }
 
-        valor = dados_cobranca.get("valor_centavos", 1000)
-        nome_item = dados_cobranca.get("nome_item", "Serviço de Locação")
-
-        expire_at = (datetime.utcnow() + timedelta(days=1)).strftime('%Y-%m-%d')
-        
-        body = {
+        preferencia = sdk.preference().create({
             "items": [{
-                "name": nome_item,
-                "value": valor,
-                "amount": 1
+                "title": titulo_item,
+                "quantity": 1,
+                "unit_price": valor
             }],
-            "settings": {
-                "payment_method": "credit_card",
-                # Adicionamos a propriedade obrigatória. False significa que
-                # a Efí NÃO vai pedir o endereço de entrega na página de pagamento.
-                "request_delivery_address": False,
-                "expire_at": expire_at
-            }
+            "payer": {"email": email_cliente},
+            "payment_methods": payment_methods,
+            "back_urls": {
+                # Use seu deep link registrado no AndroidManifest e no buildozer.spec
+                "success": "casadoar://pagamento/sucesso",
+                "failure": "casadoar://pagamento/falha",
+                "pending": "casadoar://pagamento/pendente"
+            },
+            "auto_return": "approved"  # retorna automaticamente no sucesso
+        })
+
+        return {
+            "id": preferencia["response"]["id"],
+            "init_point": preferencia["response"]["init_point"]
         }
-        response = api.create_one_step_link(body=body)
-        return response
     except Exception as e:
-        print(f"Erro detalhado na função gerar_cobranca_link_cartao: {e}")
+        print(f"[MP][CARD] Erro: {e}")
         return None
 
+# ---------------------------
+# Rotas
+# ---------------------------
 
-
-
-@app.route('/')
+@app.route("/")
 def index():
-    return "<h1>API da Casa do Ar está funcionando!</h1>"
+    return "<h1>API da Casa do Ar (Mercado Pago) ok!</h1>"
 
-@app.route('/criar_cobranca_pix', methods=['POST'])
+@app.route("/health")
+def health():
+    return jsonify(ok=True, time=datetime.utcnow().isoformat())
+
+# PIX
+@app.route("/criar_cobranca_pix", methods=["POST"])
 def criar_cobranca_pix_endpoint():
-    dados_pagamento = request.get_json()
+    """
+    Espera JSON:
+    {
+        "valor_centavos": 139900,
+        "cliente_id": 123,
+        "ar_id": 1,
+        "data_id": 45,
+        "email": "cliente@ex.com",
+        "nome_cliente": "Fulano",
+        "cpf_cliente": "12345678901"
+    }
+    """
+    dados = request.get_json(force=True)
     try:
-        resposta_efi = gerar_pix(
-            valor_centavos=dados_pagamento['valor_centavos'],
-            nome_cliente=dados_pagamento['nome_cliente'],
-            cpf_cliente=dados_pagamento['cpf_cliente']
+        resp_mp = gerar_pix_mp(
+            valor_centavos=dados["valor_centavos"],
+            email_cliente=dados["email"],
+            nome_cliente=dados.get("nome_cliente"),
+            cpf_cliente=dados.get("cpf_cliente"),
         )
-        if not resposta_efi:
-            raise Exception("Falha ao gerar dados do PIX na API da Efí.")
+        if not resp_mp or not resp_mp.get("payment_id"):
+            raise Exception(f"Falha ao gerar PIX no MP: {resp_mp}")
 
-        nova_instalacao = {
-            'cliente_id': dados_pagamento['cliente_id'], 'ar_id': dados_pagamento['ar_id'],
-            'data_instalacao_id': dados_pagamento['data_id'], 'status': 'AGUARDANDO_PAGAMENTO',
-            'txid_efi': resposta_efi.get('txid')
+        # Mantemos a coluna txid_efi para evitar migração (agora guarda o payment_id do MP).
+        nova_inst = {
+            "cliente_id": dados["cliente_id"],
+            "ar_id": dados["ar_id"],
+            "data_instalacao_id": dados["data_id"],
+            "status": "AGUARDANDO_PAGAMENTO",
+            "txid_efi": str(resp_mp["payment_id"]),
         }
-        response_db = supabase.table('instalacoes').insert(nova_instalacao).execute()
-        instalacao_criada = response_db.data[0]
+        response_db = supabase.table("instalacoes").insert(nova_inst).execute()
+        inst = response_db.data[0]
 
         return jsonify({
-            'instalacao_id': instalacao_criada['id'],
-            'imagemQrcode': resposta_efi.get('imagemQrcode'),
-            'qrcode': resposta_efi.get('qrcode')
+            "instalacao_id": inst["id"],
+            "qrcode": resp_mp.get("qr_code"),
+            "imagemQrcode": resp_mp.get("qr_code_base64"),
+            "payment_id": resp_mp["payment_id"]
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/criar_link_cartao', methods=['POST'])
+# CARTÃO
+@app.route("/criar_link_cartao", methods=["POST"])
 def criar_link_cartao_endpoint():
-    dados_cobranca = request.get_json()
+    """
+    Espera JSON:
+    {
+        "valor_centavos": 139900,
+        "email": "cliente@ex.com",
+        "cliente_id": 123,
+        "ar_id": 1,
+        "data_id": 45
+    }
+    """
+    dados = request.get_json(force=True)
     try:
-        resposta_efi = gerar_cobranca_link_cartao(dados_cobranca)
-        if not resposta_efi or 'data' not in resposta_efi or 'payment_url' not in resposta_efi['data']:
-            raise Exception(f"Erro da API Efí ao gerar link: {resposta_efi}")
+        pref = gerar_preferencia_cartao_mp(
+            valor_centavos=dados["valor_centavos"],
+            email_cliente=dados["email"],
+        )
+        if not pref or not pref.get("init_point"):
+            raise Exception(f"Erro ao criar preferência MP: {pref}")
 
-        link_pagamento = resposta_efi['data']['payment_url']
-            
-        return jsonify({"payment_url": link_pagamento})
+        # Registra instalação pendente também para cartão
+        nova_inst = {
+            "cliente_id": dados["cliente_id"],
+            "ar_id": dados["ar_id"],
+            "data_instalacao_id": dados["data_id"],
+            "status": "AGUARDANDO_PAGAMENTO",
+            "txid_efi": str(pref["id"]),  # guardamos o ID da preferência (ou salve depois o payment_id no webhook)
+        }
+        response_db = supabase.table("instalacoes").insert(nova_inst).execute()
+        inst = response_db.data[0]
+
+        return jsonify({
+            "instalacao_id": inst["id"],
+            "payment_url": pref["init_point"],
+            "preference_id": pref["id"],
+            "public_key": MP_PUBLIC_KEY  # útil se um dia usar CardForm no app
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/webhook/efi', methods=['POST'])
-def webhook_efi():
-    assinatura_recebida = request.headers.get('x-gerencianet-signature')
-    notificacao_bytes = request.data
+# STATUS POR ID DE INSTALAÇÃO
+@app.route("/instalacao/status/<int:instalacao_id>", methods=["GET"])
+def get_instalacao_status(instalacao_id: int):
     try:
-        segredo = f"{EFI_CLIENT_ID}:{EFI_CLIENT_SECRET}".encode('utf-8')
-        assinatura_esperada = hmac.new(segredo, notificacao_bytes, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(assinatura_esperada, assinatura_recebida):
-            print("!!! ASSINATURA INVÁLIDA! Webhook descartado.")
-            return jsonify(status="assinatura_invalida"), 401
-        
-        notificacao = json.loads(notificacao_bytes)
-        if 'pix' in notificacao:
-            info_pix = notificacao['pix'][0]
-            if info_pix.get('status') == 'CONCLUIDA':
-                txid = info_pix['txid']
-                supabase.table('instalacoes').update({'status': 'PAGO'}).eq('txid_efi', txid).execute()
-                print(f"✅ Instalação com txid {txid} atualizada para PAGO.")
-    except Exception as e:
-        print(f"!!! Erro ao processar o webhook: {e}")
-    return jsonify(status="recebido"), 200
-
-@app.route('/instalacao/status/<int:instalacao_id>', methods=['GET'])
-def get_instalacao_status(instalacao_id):
-    try:
-        response = supabase.table('instalacoes').select('status').eq('id', instalacao_id).single().execute()
-        return jsonify(response.data) if response.data else (jsonify({"error": "Instalação não encontrada"}), 404)
+        response = supabase.table("instalacoes").select("*").eq("id", instalacao_id).single().execute()
+        if not response.data:
+            return jsonify({"error": "Instalação não encontrada"}), 404
+        return jsonify(response.data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ---------------------------
+# Webhook Mercado Pago
+# ---------------------------
+# Configure no painel do MP:
+#   URL: https://SEU_HOST/webhook/mercadopago
+#   Eventos: payments, merchant_orders
+#
+# Observação: o MP NÃO usa assinatura HMAC como a Efí.
+# Você deve validar consultando o pagamento pelo ID que chega no webhook.
+# ---------------------------
+
+@app.route("/webhook/mercadopago", methods=["POST"])
+def webhook_mercadopago():
+    try:
+        evento = request.get_json(force=True) or {}
+        # Estrutura típica:
+        # {
+        #   "action": "payment.updated",
+        #   "data": {"id": "1234567890"},
+        #   "type": "payment"
+        # }
+        data_obj = evento.get("data", {}) or {}
+        payment_id = data_obj.get("id")
+
+        if not payment_id:
+            # Alguns webhooks podem vir com topic/querystring. Opcionalmente trate aqui.
+            return jsonify({"status": "sem payment_id"}), 200
+
+        pagamento = sdk.payment().get(payment_id)
+        resp = pagamento.get("response", {}) or {}
+        status = resp.get("status")  # 'approved', 'pending', 'rejected', etc.
+        # Você pode obter o preference_id em resp["order"]["id"], se precisar relacionar
+
+        # Atualiza a instalação correspondente
+        # 1) Tente achar por txid_efi = payment_id (se você salvou payment_id antes)
+        #    Para PIX salvamos o payment_id; para cartão salvamos preference_id.
+        #    Se quiser tratar cartão por payment_id, você pode, após o primeiro webhook,
+        #    atualizar a instalação (buscar por preference_id) e gravar txid_efi = payment_id.
+        if status == "approved":
+            supabase.table("instalacoes").update({"status": "PAGO"}).eq("txid_efi", str(payment_id)).execute()
+            # Caso não encontre (cartão), tente localizar por preference_id:
+            order = resp.get("order") or {}
+            pref_id = order.get("id")
+            if pref_id:
+                supabase.table("instalacoes").update({"status": "PAGO", "txid_efi": str(payment_id)}).eq("txid_efi", str(pref_id)).execute()
+
+        elif status in ("rejected", "cancelled"):
+            supabase.table("instalacoes").update({"status": "FALHA"}).eq("txid_efi", str(payment_id)).execute()
+
+        # Você pode logar o evento completo para auditoria:
+        print(f"[WEBHOOK MP] payment_id={payment_id} status={status}")
+
+        return jsonify({"ok": True}), 200
+
+    except Exception as e:
+        print(f"[WEBHOOK MP] ERRO: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------
+# Execução local
+# ---------------------------
+if __name__ == "__main__":
+    # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
+    app.run(host="0.0.0.0", port=5000, debug=False)
