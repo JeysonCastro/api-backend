@@ -251,53 +251,51 @@ def get_instalacao_status(instalacao_id: int):
 # Você deve validar consultando o pagamento pelo ID que chega no webhook.
 # ---------------------------
 
-@app.route("/webhook/mercadopago", methods=["POST"])
+@app.route("/webhook/mercadopago", methods=["POST", "GET"])
 def webhook_mercadopago():
     try:
+        if request.method == "GET":
+            # Para teste de conexão do MP
+            return jsonify({"status": "ok"}), 200
+
         evento = request.get_json(force=True) or {}
-        # Estrutura típica:
-        # {
-        #   "action": "payment.updated",
-        #   "data": {"id": "1234567890"},
-        #   "type": "payment"
-        # }
+        print(f"[WEBHOOK MP RAW] {json.dumps(evento, indent=2)}")
+
         data_obj = evento.get("data", {}) or {}
         payment_id = data_obj.get("id")
 
         if not payment_id:
-            # Alguns webhooks podem vir com topic/querystring. Opcionalmente trate aqui.
             return jsonify({"status": "sem payment_id"}), 200
 
         pagamento = sdk.payment().get(payment_id)
         resp = pagamento.get("response", {}) or {}
-        status = resp.get("status")  # 'approved', 'pending', 'rejected', etc.
-        # Você pode obter o preference_id em resp["order"]["id"], se precisar relacionar
+        status = resp.get("status")
+        order = resp.get("order") or {}
+        pref_id = order.get("id")
 
-        # Atualiza a instalação correspondente
-        # 1) Tente achar por txid_efi = payment_id (se você salvou payment_id antes)
-        #    Para PIX salvamos o payment_id; para cartão salvamos preference_id.
-        #    Se quiser tratar cartão por payment_id, você pode, após o primeiro webhook,
-        #    atualizar a instalação (buscar por preference_id) e gravar txid_efi = payment_id.
         if status == "approved":
-            supabase.table("instalacoes").update({"status": "PAGO"}).eq("txid_efi", str(payment_id)).execute()
-            # Caso não encontre (cartão), tente localizar por preference_id:
-            order = resp.get("order") or {}
-            pref_id = order.get("id")
+            # Atualiza por payment_id
+            supabase.table("instalacoes").update(
+                {"status": "PAGO"}
+            ).eq("txid_efi", str(payment_id)).execute()
+
+            # Se não achou pelo payment_id, tenta pelo preference_id
             if pref_id:
-                supabase.table("instalacoes").update({"status": "PAGO", "txid_efi": str(payment_id)}).eq("txid_efi", str(pref_id)).execute()
+                supabase.table("instalacoes").update(
+                    {"status": "PAGO", "txid_efi": str(payment_id)}
+                ).eq("txid_efi", str(pref_id)).execute()
 
         elif status in ("rejected", "cancelled"):
-            supabase.table("instalacoes").update({"status": "FALHA"}).eq("txid_efi", str(payment_id)).execute()
+            supabase.table("instalacoes").update(
+                {"status": "FALHA"}
+            ).eq("txid_efi", str(payment_id)).execute()
 
-        # Você pode logar o evento completo para auditoria:
         print(f"[WEBHOOK MP] payment_id={payment_id} status={status}")
-
         return jsonify({"ok": True}), 200
 
     except Exception as e:
         print(f"[WEBHOOK MP] ERRO: {e}")
         return jsonify({"error": str(e)}), 500
-
 
 # ---------------------------
 # Execução local
@@ -305,3 +303,4 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
