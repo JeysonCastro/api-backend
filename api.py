@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
 from flask import Flask, request, jsonify,redirect
+from docusign_esign import ApiClient, EnvelopesApi, RecipientViewRequest
 from supabase import create_client, Client
 import certifi
 import mercadopago
@@ -143,29 +144,44 @@ def gerar_preferencia_cartao_mp(valor_centavos: int, email_cliente: str,
         return None
 
 def gerar_link_embedded_signing(nome, email, envelope_id, client_user_id="1"):
-    """Cria a URL de assinatura embutida via DocuSign"""
+    """Cria a URL de assinatura embutida via DocuSign (JWT Auth)"""
+
+    # 1. Carregar chave privada
+    with open(os.getenv("DOCUSIGN_PRIVATE_KEY_PATH"), "r") as key_file:
+        private_key_bytes = key_file.read().encode("utf-8")
+
+    # 2. Configurar cliente
     api_client = ApiClient()
-    api_client.set_base_path(DS_BASE_PATH)
-    api_client.configure_jwt_authorization_flow_bytes(
-        DS_PRIVATE_KEY.encode("utf-8"),
-        DS_AUTH_SERVER,
-        DS_INTEGRATION_KEY,
-        DS_USER_ID,
-        3600
+    api_client.set_base_path("https://demo.docusign.net/restapi")
+    api_client.set_oauth_host_name("account-d.docusign.com")
+
+    # 3. Obter token via JWT
+    token_response = api_client.request_jwt_user_token(
+        client_id=os.getenv("DOCUSIGN_INTEGRATION_KEY"),
+        user_id=os.getenv("DOCUSIGN_USER_ID"),
+        oauth_host_name="account-d.docusign.com",
+        private_key_bytes=private_key_bytes,
+        expires_in=3600,
+        scopes=["signature", "impersonation"]
     )
 
+    access_token = token_response.access_token
+    api_client.set_access_token(access_token, 3600)
+
+    # 4. Criar a requisição da view de assinatura
     view_request = RecipientViewRequest(
         authentication_method="none",
-        client_user_id=client_user_id,
-        recipient_id="1",
-        return_url="casadoar://assinatura_concluida",
+        client_user_id=client_user_id,  # mesmo client_user_id usado ao criar envelope
+        recipient_id="1",               # ID do signer dentro do envelope
+        return_url="casadoar://assinatura_concluida",  # deep link do app
         user_name=nome,
         email=email
     )
 
+    # 5. Criar a URL de assinatura embutida
     envelopes_api = EnvelopesApi(api_client)
     view = envelopes_api.create_recipient_view(
-        DS_ACCOUNT_ID,
+        os.getenv("DOCUSIGN_ACCOUNT_ID"),
         envelope_id,
         recipient_view_request=view_request
     )
@@ -398,6 +414,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
