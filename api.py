@@ -2,10 +2,12 @@
 
 import os
 import json
+import uuid
+import base64
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify,redirect
 from supabase import create_client, Client
 import certifi
 import mercadopago
@@ -17,10 +19,20 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 MP_ACCESS_TOKEN = os.environ.get("MP_ACCESS_TOKEN")
 MP_PUBLIC_KEY = os.environ.get("MP_PUBLIC_KEY")
+DS_BASE_PATH = os.getenv("DS_BASE_PATH", "https://demo.docusign.net")
+DS_AUTH_SERVER = os.getenv("DS_AUTH_SERVER", "account-d.docusign.com")
+DS_INTEGRATION_KEY = os.getenv("DS_INTEGRATION_KEY")
+DS_USER_ID = os.getenv("DS_USER_ID")
+DS_ACCOUNT_ID = os.getenv("DS_ACCOUNT_ID")
+DS_PRIVATE_KEY = os.getenv("DS_PRIVATE_KEY")
+
 
 # ---------------------------
 # Inicializações
 # ---------------------------
+if not all([DS_INTEGRATION_KEY, DS_USER_ID, DS_ACCOUNT_ID, DS_PRIVATE_KEY]):
+    raise ValueError("⚠️ Variáveis de ambiente DocuSign não configuradas corretamente.")
+
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     app = Flask(__name__)
@@ -128,6 +140,36 @@ def gerar_preferencia_cartao_mp(valor_centavos: int, email_cliente: str,
     except Exception as e:
         print(f"[MP][CARD] Erro: {e}")
         return None
+
+def gerar_link_embedded_signing(nome, email, envelope_id, client_user_id="1"):
+    """Cria a URL de assinatura embutida via DocuSign"""
+    api_client = ApiClient()
+    api_client.set_base_path(DS_BASE_PATH)
+    api_client.configure_jwt_authorization_flow_bytes(
+        DS_PRIVATE_KEY.encode("utf-8"),
+        DS_AUTH_SERVER,
+        DS_INTEGRATION_KEY,
+        DS_USER_ID,
+        3600
+    )
+
+    view_request = RecipientViewRequest(
+        authentication_method="none",
+        client_user_id=client_user_id,
+        recipient_id="1",
+        return_url="casadoar://assinatura_concluida",
+        user_name=nome,
+        email=email
+    )
+
+    envelopes_api = EnvelopesApi(api_client)
+    view = envelopes_api.create_recipient_view(
+        DS_ACCOUNT_ID,
+        envelope_id,
+        recipient_view_request=view_request
+    )
+
+    return view.url
 
 # ---------------------------
 # Rotas
@@ -240,6 +282,58 @@ def get_instalacao_status(instalacao_id: int):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Endpoint para gerar link de assinatura
+# -------------------------------
+@app.route("/gerar_link_assinatura", methods=["POST"])
+def gerar_link_assinatura():
+    """
+    Espera JSON:
+    {
+      "envelope_id": "xxxx",
+      "nome": "Fulano",
+      "email": "fulano@email.com"
+    }
+    """
+    dados = request.get_json(force=True)
+    try:
+        envelope_id = dados["envelope_id"]
+        nome = dados["nome"]
+        email = dados["email"]
+
+        guid = str(uuid.uuid4())
+        sign_sessions[guid] = {
+            "envelope_id": envelope_id,
+            "nome": nome,
+            "email": email
+        }
+
+        link_publico = f"{request.url_root}sign/{guid}"
+        return jsonify({"link_assinatura": link_publico})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# -------------------------------
+# Redireciona para DocuSign
+# -------------------------------
+@app.route("/sign/<guid>", methods=["GET"])
+def redirect_to_docusign(guid):
+    """Redireciona o navegador para a URL de assinatura real"""
+    sessao = sign_sessions.get(guid)
+    if not sessao:
+        return jsonify({"error": "Sessão não encontrada ou expirada."}), 404
+
+    try:
+        url_assinatura = gerar_link_embedded_signing(
+            nome=sessao["nome"],
+            email=sessao["email"],
+            envelope_id=sessao["envelope_id"]
+        )
+        return redirect(url_assinatura, code=302)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ---------------------------
 # Webhook Mercado Pago
 # ---------------------------
@@ -303,4 +397,5 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
