@@ -374,25 +374,6 @@ def gerar_link_assinatura():
         return jsonify({"error": "Erro interno ao gerar link de assinatura."}), 500
 
 
-@app.route("/sign/<guid>", methods=["GET"])
-def redirect_to_docusign(guid):
-    """Redireciona para a URL de assinatura da DocuSign"""
-    sessao = buscar_sessao_redis(guid)
-    if not sessao:
-        return jsonify({"error": "Sessão não encontrada ou expirada."}), 404
-
-    try:
-        url_assinatura = gerar_link_embedded_signing(
-            nome=sessao["nome"],
-            email=sessao["email"],
-            envelope_id=sessao["envelope_id"]
-        )
-        remover_sessao_redis(guid)
-        return redirect(url_assinatura, code=302)
-
-    except Exception as e:
-        logging.error(f"Erro ao redirecionar: {str(e)}")
-        return jsonify({"error": "Erro interno ao redirecionar para assinatura."}), 500
 # -------------------------------
 # Redireciona para DocuSign
 # -------------------------------
@@ -476,6 +457,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
