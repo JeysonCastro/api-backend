@@ -25,9 +25,9 @@ MP_ACCESS_TOKEN = os.environ.get("MP_ACCESS_TOKEN")
 MP_PUBLIC_KEY = os.environ.get("MP_PUBLIC_KEY")
 DS_BASE_PATH = os.getenv("DS_BASE_PATH", "https://demo.docusign.net")
 DS_AUTH_SERVER = os.getenv("DS_AUTH_SERVER", "account-d.docusign.com")
-DS_INTEGRATION_KEY = os.getenv("DS_INTEGRATION_KEY")
-DS_USER_ID = os.getenv("DS_USER_ID")
-DS_ACCOUNT_ID = os.getenv("DS_ACCOUNT_ID")
+DS_INTEGRATION_KEY = os.getenv("DOCUSIGN_INTEGRATION_KEY")
+DS_USER_ID = os.getenv("DOCUSIGN_USER_ID")
+DS_ACCOUNT_ID = os.getenv("DOCUSIGN_ACCOUNT_ID")
 with open(os.getenv("DOCUSIGN_PRIVATE_KEY_PATH"), "r") as key_file:
     private_key = key_file.read().encode("utf-8")
 
@@ -417,6 +417,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
