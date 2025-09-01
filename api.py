@@ -30,7 +30,7 @@ DS_INTEGRATION_KEY = os.getenv("DOCUSIGN_INTEGRATION_KEY")
 DS_USER_ID = os.getenv("DOCUSIGN_USER_ID")
 DS_ACCOUNT_ID = os.getenv("DOCUSIGN_ACCOUNT_ID")
 with open(os.getenv("DOCUSIGN_PRIVATE_KEY_PATH"), "r") as key_file:
-    private_key = key_file.read().encode("utf-8")
+    DS_PRIVATE_KEY = key_file.read().encode("utf-8")
 
 
 # ---------------------------
@@ -476,6 +476,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
