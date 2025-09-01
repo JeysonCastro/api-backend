@@ -1,5 +1,6 @@
 # app.py  — versão Mercado Pago (PIX + Cartão) para sua VM atual
-
+import redis
+import logging
 import os
 import json
 import uuid
@@ -57,6 +58,40 @@ def _ensure_data_uri_png(b64_str: str) -> str:
     if not b64_str.startswith("data:image"):
         return f"data:image/png;base64,{b64_str}"
     return b64_str
+
+
+redis_client = redis.Redis(host='localhost', port=6379, db=0)
+
+# Tempo de expiração da sessão (10 minutos)
+SESSION_EXPIRATION_SECONDS = 600
+
+def salvar_sessao_redis(guid, envelope_id, nome, email):
+    """Salva a sessão no Redis com expiração"""
+    try:
+        dados = {
+            "envelope_id": envelope_id,
+            "nome": nome,
+            "email": email
+        }
+        redis_client.setex(guid, timedelta(seconds=SESSION_EXPIRATION_SECONDS), json.dumps(dados))
+    except Exception as e:
+        logging.error(f"Erro ao salvar sessão no Redis: {e}")
+
+def buscar_sessao_redis(guid):
+    """Busca sessão no Redis"""
+    try:
+        data = redis_client.get(guid)
+        return json.loads(data) if data else None
+    except Exception as e:
+        logging.error(f"Erro ao buscar sessão no Redis: {e}")
+        return None
+
+def remover_sessao_redis(guid):
+    """Remove sessão do Redis"""
+    try:
+        redis_client.delete(guid)
+    except Exception as e:
+        logging.error(f"Erro ao remover sessão no Redis: {e}")
 
 # ---------------------------
 # Mercado Pago: PIX
@@ -325,24 +360,39 @@ def gerar_link_assinatura():
     """
     dados = request.get_json(force=True)
     try:
-        envelope_id = dados["envelope_id"]
-        nome = dados["nome"]
-        email = dados["email"]
+        if not all(k in dados for k in ["envelope_id", "nome", "email"]):
+            return jsonify({"error": "Campos obrigatórios ausentes"}), 400
 
         guid = str(uuid.uuid4())
-        sign_sessions[guid] = {
-            "envelope_id": envelope_id,
-            "nome": nome,
-            "email": email
-        }
+        salvar_sessao_redis(guid, dados["envelope_id"], dados["nome"], dados["email"])
 
         link_publico = f"{request.url_root}sign/{guid}"
         return jsonify({"link_assinatura": link_publico})
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logging.error(f"Erro ao gerar link: {str(e)}")
+        return jsonify({"error": "Erro interno ao gerar link de assinatura."}), 500
 
 
+@app.route("/sign/<guid>", methods=["GET"])
+def redirect_to_docusign(guid):
+    """Redireciona para a URL de assinatura da DocuSign"""
+    sessao = buscar_sessao_redis(guid)
+    if not sessao:
+        return jsonify({"error": "Sessão não encontrada ou expirada."}), 404
+
+    try:
+        url_assinatura = gerar_link_embedded_signing(
+            nome=sessao["nome"],
+            email=sessao["email"],
+            envelope_id=sessao["envelope_id"]
+        )
+        remover_sessao_redis(guid)
+        return redirect(url_assinatura, code=302)
+
+    except Exception as e:
+        logging.error(f"Erro ao redirecionar: {str(e)}")
+        return jsonify({"error": "Erro interno ao redirecionar para assinatura."}), 500
 # -------------------------------
 # Redireciona para DocuSign
 # -------------------------------
@@ -426,6 +476,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
