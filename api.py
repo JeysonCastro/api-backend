@@ -248,7 +248,9 @@ def gerar_link_embedded_signing(nome, email, client_user_id="1"):
         return view.url
 
     except Exception as e:
-        logging.error(f"[ERRO DOCUSIGN] {e}")
+        import traceback
+        print("[ERRO DOCUSIGN]", str(e))
+        print(traceback.format_exc())
         return None
 
 # ---------------------------
@@ -373,19 +375,26 @@ def gerar_link_assinatura_endpoint():
         "email": "fulano@email.com"
     }
     """
-    dados = request.get_json(force=True)
-    if not all(k in dados for k in ["nome", "email"]):
-        return jsonify({"error": "Campos obrigatórios ausentes"}), 400
-
-    link = gerar_link_embedded_signing(dados["nome"], dados["email"])
-    if not link:
-        return jsonify({"error": "Erro ao gerar link de assinatura"}), 500
-
-    # opcional: salva sessão no Redis
-    guid = str(uuid.uuid4())
-    salvar_sessao_redis(guid, "ENVELOPE_TEMP", dados["nome"], dados["email"])
-
-    return jsonify({"link_assinatura": link, "guid": guid})
+    try:
+        dados = request.get_json(force=True)
+        if not all(k in dados for k in ["nome", "email"]):
+            return jsonify({"error": "Campos obrigatórios ausentes"}), 400
+    
+        link = gerar_link_embedded_signing(dados["nome"], dados["email"])
+        if not link:
+            return jsonify({"error": "Erro ao gerar link de assinatura"}), 500
+    
+        # opcional: salva sessão no Redis
+        guid = str(uuid.uuid4())
+        salvar_sessao_redis(guid, "ENVELOPE_TEMP", dados["nome"], dados["email"])
+    
+        return jsonify({"link_assinatura": link, "guid": guid})
+    except Exception as e:
+        import traceback
+        # Logar no console para debug
+        print("[ERRO FLASK]", str(e))
+        print(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
 
 # -------------------------------
 # Redireciona para DocuSign
@@ -470,6 +479,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
