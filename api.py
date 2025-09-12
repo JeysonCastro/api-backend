@@ -182,49 +182,38 @@ def gerar_preferencia_cartao_mp(valor_centavos: int, email_cliente: str,
         return None
 
 def gerar_link_embedded_signing(nome, email, envelope_id, client_user_id="1"):
-    """
-    Gera uma URL de assinatura embutida para um envelope existente no DocuSign.
-    """
-
     try:
-        # 1. Carregar chave privada
-        private_key_path = os.getenv("DOCUSIGN_PRIVATE_KEY_PATH")
-        if not private_key_path or not os.path.exists(private_key_path):
-            raise FileNotFoundError(f"Chave privada não encontrada em {private_key_path}")
-        with open(private_key_path, "r") as key_file:
-            private_key_bytes = key_file.read().encode("utf-8")
-
-        # 2. Configurar cliente DocuSign
+        # 1. Configurar cliente DocuSign
         api_client = ApiClient()
         api_client.set_base_path("https://demo.docusign.net/restapi")
         api_client.set_oauth_host_name("account-d.docusign.com")
 
-        # 3. Autenticar via JWT
+        # 2. Autenticar via JWT
         token_response = api_client.request_jwt_user_token(
-            client_id=os.getenv("DOCUSIGN_INTEGRATION_KEY"),
-            user_id=os.getenv("DOCUSIGN_USER_ID"),
+            client_id=DS_INTEGRATION_KEY,
+            user_id=DS_USER_ID,
             oauth_host_name="account-d.docusign.com",
-            private_key_bytes=private_key_bytes,
+            private_key_bytes=DS_PRIVATE_KEY,
             expires_in=3600,
             scopes=["signature", "impersonation"]
         )
         access_token = token_response.access_token
         api_client.set_access_token(access_token, 3600)
 
-        # 4. Criar requisição de URL de assinatura
+        # 3. Criar requisição de URL de assinatura
         view_request = RecipientViewRequest(
             authentication_method="none",
-            client_user_id=client_user_id,  # mesmo client_user_id usado ao criar envelope
-            recipient_id="1",               # ID do signer dentro do envelope
+            client_user_id=client_user_id,  # tem que bater com o envelope criado
+            recipient_id="1",               # igual ao definido no envelope
             return_url="casadoar://assinatura_concluida",
             user_name=nome,
             email=email
         )
 
-        # 5. Criar URL de assinatura
+        # 4. Gerar URL
         envelopes_api = EnvelopesApi(api_client)
         view = envelopes_api.create_recipient_view(
-            os.getenv("DOCUSIGN_ACCOUNT_ID"),
+            DS_ACCOUNT_ID,
             envelope_id,
             recipient_view_request=view_request
         )
@@ -232,7 +221,7 @@ def gerar_link_embedded_signing(nome, email, envelope_id, client_user_id="1"):
         return view.url
 
     except Exception as e:
-        print(f"[ERRO] Falha ao gerar link de assinatura: {e}")
+        logging.error(f"[ERRO DOCUSIGN] {e}")
         return None
 
 # ---------------------------
@@ -380,7 +369,7 @@ def gerar_link_assinatura():
 @app.route("/sign/<guid>", methods=["GET"])
 def redirect_to_docusign(guid):
     """Redireciona o navegador para a URL de assinatura real"""
-    sessao = sign_sessions.get(guid)
+    sessao = buscar_sessao_redis(guid)  # ✅ corrigido
     if not sessao:
         return jsonify({"error": "Sessão não encontrada ou expirada."}), 404
 
@@ -457,6 +446,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
