@@ -191,7 +191,7 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
     """
     try:
         # 1. Lê PDF fixo
-        pdf_path = os.path.join(os.path.dirname(__file__), "contratos/contrato_padrao.pdf")
+        pdf_path = os.path.join(os.path.dirname(__file__), "contrato_padrao.pdf")
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF não encontrado em {pdf_path}")
         with open(pdf_path, "rb") as f:
@@ -533,6 +533,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
