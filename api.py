@@ -182,9 +182,13 @@ def gerar_preferencia_cartao_mp(valor_centavos: int, email_cliente: str,
         return None
 
 # ---------------------------
-# Função para criar envelope e gerar link de assinatura
+# DocuSign: criar envelope + gerar recipient view
 # ---------------------------
-def gerar_link_embedded_signing(nome, email, client_user_id="1"):
+def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
+    """
+    Cria envelope com o PDF fixo e já gera uma recipient view (URL de assinatura).
+    Retorna (envelope_id, signing_url) ou (None, None) em caso de erro.
+    """
     try:
         # 1. Lê PDF fixo
         pdf_path = os.path.join(os.path.dirname(__file__), "contratos/contrato_padrao.pdf")
@@ -195,14 +199,14 @@ def gerar_link_embedded_signing(nome, email, client_user_id="1"):
 
         # 2. Configura cliente DocuSign
         api_client = ApiClient()
-        api_client.set_base_path("https://demo.docusign.net/restapi")
-        api_client.set_oauth_host_name("account-d.docusign.com")
+        api_client.set_base_path(DS_BASE_PATH)  # usa DS_BASE_PATH configurável
+        api_client.set_oauth_host_name(DS_AUTH_SERVER)
 
         # 3. Autentica via JWT
         token_response = api_client.request_jwt_user_token(
             client_id=DS_INTEGRATION_KEY,
             user_id=DS_USER_ID,
-            oauth_host_name="account-d.docusign.com",
+            oauth_host_name=DS_AUTH_SERVER,
             private_key_bytes=DS_PRIVATE_KEY,
             expires_in=3600,
             scopes=["signature", "impersonation"]
@@ -232,9 +236,12 @@ def gerar_link_embedded_signing(nome, email, client_user_id="1"):
 
         envelopes_api = EnvelopesApi(api_client)
         envelope_summary = envelopes_api.create_envelope(DS_ACCOUNT_ID, envelope_definition)
-        envelope_id = envelope_summary.envelope_id
+        envelope_id = getattr(envelope_summary, "envelope_id", None) or envelope_summary.envelopeId or envelope_summary.get("envelopeId")
 
-        # 5. Gera link de assinatura embutida
+        if not envelope_id:
+            raise Exception(f"Não foi possível obter envelope_id da resposta: {envelope_summary}")
+
+        # 5. Gera link de assinatura embutida (recipient view)
         view_request = RecipientViewRequest(
             authentication_method="none",
             client_user_id=client_user_id,
@@ -244,12 +251,53 @@ def gerar_link_embedded_signing(nome, email, client_user_id="1"):
             email=email
         )
         view = envelopes_api.create_recipient_view(DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
+        signing_url = getattr(view, "url", None) or view.get("url")
 
-        return view.url
+        return envelope_id, signing_url
 
     except Exception as e:
         import traceback
-        print("[ERRO DOCUSIGN]", str(e))
+        print("[ERRO DOCUSIGN criar_envelope_e_gerar_view]", str(e))
+        print(traceback.format_exc())
+        return None, None
+
+
+def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id="1"):
+    """
+    Se você já tem envelope_id, gera uma nova recipient view (URL) para abrir a assinatura.
+    Útil para o endpoint /sign/<guid>.
+    """
+    try:
+        api_client = ApiClient()
+        api_client.set_base_path(DS_BASE_PATH)
+        api_client.set_oauth_host_name(DS_AUTH_SERVER)
+
+        token_response = api_client.request_jwt_user_token(
+            client_id=DS_INTEGRATION_KEY,
+            user_id=DS_USER_ID,
+            oauth_host_name=DS_AUTH_SERVER,
+            private_key_bytes=DS_PRIVATE_KEY,
+            expires_in=3600,
+            scopes=["signature", "impersonation"]
+        )
+        access_token = token_response.access_token
+        api_client.set_access_token(access_token, 3600)
+
+        envelopes_api = EnvelopesApi(api_client)
+        view_request = RecipientViewRequest(
+            authentication_method="none",
+            client_user_id=client_user_id,
+            recipient_id="1",
+            return_url="casadoar://assinatura_concluida",
+            user_name=nome,
+            email=email
+        )
+        view = envelopes_api.create_recipient_view(DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
+        signing_url = getattr(view, "url", None) or view.get("url")
+        return signing_url
+    except Exception as e:
+        import traceback
+        print("[ERRO DOCUSIGN create_recipient_view_for_envelope]", str(e))
         print(traceback.format_exc())
         return None
 
@@ -364,8 +412,6 @@ def get_instalacao_status(instalacao_id: int):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Endpoint para gerar link de assinatura
-# -------------------------------
 @app.route("/gerar_link_assinatura", methods=["POST"])
 def gerar_link_assinatura_endpoint():
     """
@@ -379,43 +425,51 @@ def gerar_link_assinatura_endpoint():
         dados = request.get_json(force=True)
         if not all(k in dados for k in ["nome", "email"]):
             return jsonify({"error": "Campos obrigatórios ausentes"}), 400
-    
-        link = gerar_link_embedded_signing(dados["nome"], dados["email"])
-        if not link:
-            return jsonify({"error": "Erro ao gerar link de assinatura"}), 500
-    
-        # opcional: salva sessão no Redis
+
+        envelope_id, link = criar_envelope_e_gerar_view(dados["nome"], dados["email"])
+        if not envelope_id or not link:
+            return jsonify({"error": "Erro ao gerar envelope / link de assinatura"}), 500
+
+        # Salva sessão real no Redis — agora com envelope_id válido
         guid = str(uuid.uuid4())
-        salvar_sessao_redis(guid, "ENVELOPE_TEMP", dados["nome"], dados["email"])
-    
-        return jsonify({"link_assinatura": link, "guid": guid})
+        salvar_sessao_redis(guid, envelope_id, dados["nome"], dados["email"])
+
+        return jsonify({"link_assinatura": link, "guid": guid, "envelope_id": envelope_id})
+
     except Exception as e:
         import traceback
-        # Logar no console para debug
-        print("[ERRO FLASK]", str(e))
+        print("[ERRO FLASK gerar_link_assinatura_endpoint]", str(e))
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
-
+        
 # -------------------------------
 # Redireciona para DocuSign
 # -------------------------------
 @app.route("/sign/<guid>", methods=["GET"])
 def redirect_to_docusign(guid):
     """Redireciona o navegador para a URL de assinatura real"""
-    sessao = buscar_sessao_redis(guid)  # ✅ corrigido
+    sessao = buscar_sessao_redis(guid)
     if not sessao:
         return jsonify({"error": "Sessão não encontrada ou expirada."}), 404
 
     try:
-        url_assinatura = gerar_link_embedded_signing(
-            nome=sessao["nome"],
-            email=sessao["email"],
-            envelope_id=sessao["envelope_id"]
-        )
+        envelope_id = sessao.get("envelope_id")
+        nome = sessao.get("nome")
+        email = sessao.get("email")
+        if not envelope_id:
+            return jsonify({"error": "Envelope ID não encontrado na sessão."}), 500
+
+        url_assinatura = create_recipient_view_for_envelope(envelope_id, nome, email)
+        if not url_assinatura:
+            return jsonify({"error": "Falha ao gerar URL de assinatura para o envelope existente."}), 500
+
         return redirect(url_assinatura, code=302)
     except Exception as e:
+        import traceback
+        print("[ERRO FLASK redirect_to_docusign]", str(e))
+        print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
-
+        
 # ---------------------------
 # Webhook Mercado Pago
 # ---------------------------
@@ -479,6 +533,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
