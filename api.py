@@ -213,8 +213,15 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             expires_in=3600,
             scopes=["signature", "impersonation"]
         )
-        api_client.set_access_token(access_token)
-        print("[DEBUG] JWT gerado com sucesso.")
+        # Garante que extraímos corretamente o token
+        if isinstance(token_response, dict):
+            access_token = token_response.get("access_token")
+        elif hasattr(token_response, "access_token"):
+            access_token = token_response.access_token
+        else:
+            access_token = str(token_response)
+
+        api_client.set_access_token({"access_token": access_token})
 
         # 4. Cria envelope
         envelope_definition = {
@@ -567,6 +574,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
