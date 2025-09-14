@@ -438,9 +438,10 @@ def gerar_link_assinatura_endpoint():
 
     except Exception as e:
         import traceback
-        erro = traceback.format_exc()
-        print("[ERRO FLASK gerar_link_assinatura_endpoint]", erro)
-        return jsonify({"error": erro}), 500
+        tb = traceback.format_exc()
+        print("[ERRO FLASK gerar_link_assinatura_endpoint]", str(e))
+        print(tb)
+        return jsonify({"error": str(e), "trace": tb}), 500
         
 # -------------------------------
 # Redireciona para DocuSign
@@ -533,6 +534,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
