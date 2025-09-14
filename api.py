@@ -201,8 +201,8 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
 
         # 2. Configura cliente DocuSign
         api_client = ApiClient()
-        api_client.set_base_path(DS_BASE_PATH)  # ex: https://na2.docusign.net/restapi
-        api_client.set_oauth_host_name(DS_AUTH_SERVER)  # ex: account.docusign.com
+        api_client.set_base_path(DS_BASE_PATH)
+        api_client.set_oauth_host_name(DS_AUTH_SERVER)
 
         # 3. Autentica via JWT
         token_response = api_client.request_jwt_user_token(
@@ -215,6 +215,7 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
         )
         access_token = token_response.access_token
         api_client.set_access_token(access_token, 3600)
+        print("[DEBUG] JWT gerado com sucesso.")
 
         # 4. Cria envelope
         envelope_definition = {
@@ -239,7 +240,13 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
         envelopes_api = EnvelopesApi(api_client)
         envelope_summary = envelopes_api.create_envelope(DS_ACCOUNT_ID, envelope_definition)
 
-        # 5. Extrai envelope_id de forma segura
+        # Log completo da resposta
+        try:
+            print("[DEBUG] envelope_summary dict:", vars(envelope_summary))
+        except Exception:
+            print("[DEBUG] envelope_summary raw:", str(envelope_summary))
+
+        # Extração robusta do envelope_id
         envelope_id = None
         if hasattr(envelope_summary, "envelope_id"):
             envelope_id = envelope_summary.envelope_id
@@ -249,28 +256,32 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             envelope_id = envelope_summary.get("envelopeId")
 
         if not envelope_id:
-            raise Exception(f"[ERRO] envelope_id não encontrado. Resposta: {envelope_summary}")
+            raise Exception(f"Não foi possível obter envelope_id da resposta: {envelope_summary}")
 
-        print(f"[DEBUG] Envelope criado com ID: {envelope_id}")
+        print(f"[DEBUG] Envelope criado com sucesso: {envelope_id}")
 
-        # 6. Gera link de assinatura (recipient view)
+        # 5. Gera link de assinatura embutida (recipient view)
         view_request = RecipientViewRequest(
             authentication_method="none",
             client_user_id=client_user_id,
             recipient_id="1",
-            return_url="https://casadoar.ddns.net/docusign_callback",  # precisa ser HTTPS válido
+            # ⚠️ IMPORTANTE: return_url precisa ser público na sandbox/teste
+            return_url="https://casadoar.ddns.net/docusign_callback",
             user_name=nome,
             email=email
         )
         view = envelopes_api.create_recipient_view(DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
-        signing_url = getattr(view, "url", None) or (view.get("url") if isinstance(view, dict) else None)
 
+        signing_url = getattr(view, "url", None) or (view.get("url") if isinstance(view, dict) else None)
         if not signing_url:
-            raise Exception(f"[ERRO] Não foi possível obter signing_url. Resposta: {view}")
+            raise Exception(f"Não foi possível obter URL de assinatura da resposta: {view}")
+
+        print(f"[DEBUG] URL de assinatura gerada: {signing_url}")
 
         return envelope_id, signing_url
 
     except Exception as e:
+        import traceback
         print("[ERRO DOCUSIGN criar_envelope_e_gerar_view]", str(e))
         print(traceback.format_exc())
         return None, None
@@ -557,6 +568,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
