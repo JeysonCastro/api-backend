@@ -184,6 +184,7 @@ def gerar_preferencia_cartao_mp(valor_centavos: int, email_cliente: str,
 # ---------------------------
 # DocuSign: criar envelope + gerar recipient view
 # ---------------------------
+
 def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
     """
     Cria envelope com o PDF fixo e já gera uma recipient view (URL de assinatura).
@@ -199,8 +200,8 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
 
         # 2. Configura cliente DocuSign
         api_client = ApiClient()
-        api_client.set_base_path(DS_BASE_PATH)  # usa DS_BASE_PATH configurável
-        api_client.set_oauth_host_name(DS_AUTH_SERVER)
+        api_client.set_base_path(DS_BASE_PATH)  # ex: https://na2.docusign.net/restapi
+        api_client.set_oauth_host_name(DS_AUTH_SERVER)  # ex: account.docusign.com
 
         # 3. Autentica via JWT
         token_response = api_client.request_jwt_user_token(
@@ -236,27 +237,39 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
 
         envelopes_api = EnvelopesApi(api_client)
         envelope_summary = envelopes_api.create_envelope(DS_ACCOUNT_ID, envelope_definition)
-        envelope_id = getattr(envelope_summary, "envelope_id", None) or envelope_summary.envelopeId or envelope_summary.get("envelopeId")
+
+        # 5. Extrai envelope_id de forma segura
+        envelope_id = None
+        if hasattr(envelope_summary, "envelope_id"):
+            envelope_id = envelope_summary.envelope_id
+        elif hasattr(envelope_summary, "envelopeId"):
+            envelope_id = envelope_summary.envelopeId
+        elif isinstance(envelope_summary, dict):
+            envelope_id = envelope_summary.get("envelopeId")
 
         if not envelope_id:
-            raise Exception(f"Não foi possível obter envelope_id da resposta: {envelope_summary}")
+            raise Exception(f"[ERRO] envelope_id não encontrado. Resposta: {envelope_summary}")
 
-        # 5. Gera link de assinatura embutida (recipient view)
+        print(f"[DEBUG] Envelope criado com ID: {envelope_id}")
+
+        # 6. Gera link de assinatura (recipient view)
         view_request = RecipientViewRequest(
             authentication_method="none",
             client_user_id=client_user_id,
             recipient_id="1",
-            return_url="casadoar://assinatura_concluida",
+            return_url="https://casadoar.ddns.net/docusign_callback",  # precisa ser HTTPS válido
             user_name=nome,
             email=email
         )
         view = envelopes_api.create_recipient_view(DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
-        signing_url = getattr(view, "url", None) or view.get("url")
+        signing_url = getattr(view, "url", None) or (view.get("url") if isinstance(view, dict) else None)
+
+        if not signing_url:
+            raise Exception(f"[ERRO] Não foi possível obter signing_url. Resposta: {view}")
 
         return envelope_id, signing_url
 
     except Exception as e:
-        import traceback
         print("[ERRO DOCUSIGN criar_envelope_e_gerar_view]", str(e))
         print(traceback.format_exc())
         return None, None
@@ -265,7 +278,7 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
 def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id="1"):
     """
     Se você já tem envelope_id, gera uma nova recipient view (URL) para abrir a assinatura.
-    Útil para o endpoint /sign/<guid>.
+    Útil para reabrir uma assinatura sem recriar o envelope.
     """
     try:
         api_client = ApiClient()
@@ -288,18 +301,23 @@ def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id=
             authentication_method="none",
             client_user_id=client_user_id,
             recipient_id="1",
-            return_url="casadoar://assinatura_concluida",
+            return_url="https://casadoar.ddns.net/docusign_callback",
             user_name=nome,
             email=email
         )
         view = envelopes_api.create_recipient_view(DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
-        signing_url = getattr(view, "url", None) or view.get("url")
+        signing_url = getattr(view, "url", None) or (view.get("url") if isinstance(view, dict) else None)
+
+        if not signing_url:
+            raise Exception(f"[ERRO] Não foi possível obter signing_url. Resposta: {view}")
+
         return signing_url
+
     except Exception as e:
-        import traceback
         print("[ERRO DOCUSIGN create_recipient_view_for_envelope]", str(e))
         print(traceback.format_exc())
         return None
+
 
 # ---------------------------
 # Rotas
@@ -538,6 +556,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
