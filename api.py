@@ -189,9 +189,11 @@ def gerar_preferencia_cartao_mp(valor_centavos: int, email_cliente: str,
 def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
     """
     Cria envelope com o PDF fixo e já gera uma recipient view (URL de assinatura).
-    Retorna (envelope_id, signing_url) ou (None, None) em caso de erro.
+    Retorna (envelope_id, signing_url, session_id) ou (None, None, None) em caso de erro.
     """
     try:
+        import uuid
+
         # 1. Lê PDF fixo
         pdf_path = os.path.join(os.path.dirname(__file__), "contrato_padrao.pdf")
         if not os.path.exists(pdf_path):
@@ -213,15 +215,14 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             expires_in=3600,
             scopes=["signature", "impersonation"]
         )
-        # Garante que extraímos corretamente o token
-        if isinstance(token_response, dict):
-            access_token = token_response.get("access_token")
-        elif hasattr(token_response, "access_token"):
-            access_token = token_response.access_token
-        else:
-            access_token = str(token_response)
+        access_token = (
+            token_response.get("access_token")
+            if isinstance(token_response, dict)
+            else getattr(token_response, "access_token", str(token_response))
+        )
 
-        api_client.set_access_token({"access_token": access_token})
+        # Aplica token
+        api_client.set_default_header("Authorization", f"Bearer {access_token}")
 
         # 4. Cria envelope
         envelope_definition = {
@@ -246,52 +247,48 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
         envelopes_api = EnvelopesApi(api_client)
         envelope_summary = envelopes_api.create_envelope(DS_ACCOUNT_ID, envelope_definition)
 
-        # Log completo da resposta
-        try:
-            print("[DEBUG] envelope_summary dict:", vars(envelope_summary))
-        except Exception:
-            print("[DEBUG] envelope_summary raw:", str(envelope_summary))
-
         # Extração robusta do envelope_id
-        envelope_id = None
-        if hasattr(envelope_summary, "envelope_id"):
-            envelope_id = envelope_summary.envelope_id
-        elif hasattr(envelope_summary, "envelopeId"):
-            envelope_id = envelope_summary.envelopeId
-        elif isinstance(envelope_summary, dict):
-            envelope_id = envelope_summary.get("envelopeId")
+        envelope_id = getattr(envelope_summary, "envelope_id", None) \
+                      or getattr(envelope_summary, "envelopeId", None) \
+                      or (envelope_summary.get("envelopeId") if isinstance(envelope_summary, dict) else None)
 
         if not envelope_id:
             raise Exception(f"Não foi possível obter envelope_id da resposta: {envelope_summary}")
 
         print(f"[DEBUG] Envelope criado com sucesso: {envelope_id}")
 
-        # 5. Gera link de assinatura embutida (recipient view)
+        # 5. Cria session_id e salva sessão no Redis
+        session_id = str(uuid.uuid4())
+        salvar_sessao_redis(session_id, envelope_id, nome, email)
+
+        # 6. Gera link de assinatura embutida (recipient view)
         view_request = RecipientViewRequest(
             authentication_method="none",
             client_user_id=client_user_id,
             recipient_id="1",
-            # ⚠️ IMPORTANTE: return_url precisa ser público na sandbox/teste
-            return_url="https://casadoar.ddns.net/docusign_callback",
+            return_url=f"https://casadoar.ddns.net/docusign_callback?session_id={session_id}",
             user_name=nome,
             email=email
         )
-        view = envelopes_api.create_recipient_view(DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
+        view = envelopes_api.create_recipient_view(
+            DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request
+        )
 
-        signing_url = getattr(view, "url", None) or (view.get("url") if isinstance(view, dict) else None)
+        signing_url = getattr(view, "url", None) or (
+            view.get("url") if isinstance(view, dict) else None
+        )
         if not signing_url:
             raise Exception(f"Não foi possível obter URL de assinatura da resposta: {view}")
 
         print(f"[DEBUG] URL de assinatura gerada: {signing_url}")
 
-        return envelope_id, signing_url
+        return envelope_id, signing_url, session_id
 
     except Exception as e:
         import traceback
         print("[ERRO DOCUSIGN criar_envelope_e_gerar_view]", str(e))
         print(traceback.format_exc())
-        return None, None
-
+        return None, None, None
 
 def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id="1"):
     """
@@ -451,38 +448,34 @@ def get_instalacao_status(instalacao_id: int):
 @app.route("/gerar_link_assinatura", methods=["POST"])
 def gerar_link_assinatura_endpoint():
     """
-    Recebe JSON:
-    {
-        "nome": "Fulano",
-        "email": "fulano@email.com"
-    }
+    Cria envelope no DocuSign, gera link de assinatura e salva sessão no Redis.
+    Retorna JSON com session_id e signing_url.
     """
     try:
-        dados = request.get_json(force=True)
-        if not all(k in dados for k in ["nome", "email"]):
-            return jsonify({"error": "Campos obrigatórios ausentes"}), 400
+        data = request.get_json(force=True)
+        nome = data.get("nome")
+        email = data.get("email")
 
-        envelope_id, link = criar_envelope_e_gerar_view(dados["nome"], dados["email"])
-        if not envelope_id or not link:
-            import traceback
-            tb = traceback.format_exc()
-            return jsonify({
-                "error": "Falha ao criar envelope ou link de assinatura",
-                "trace": tb
-            }), 500
-        # Salva sessão real no Redis — agora com envelope_id válido
-        guid = str(uuid.uuid4())
-        salvar_sessao_redis(guid, envelope_id, dados["nome"], dados["email"])
+        if not nome or not email:
+            return jsonify({"error": "Nome e e-mail são obrigatórios"}), 400
 
-        return jsonify({"link_assinatura": link, "guid": guid, "envelope_id": envelope_id})
+        envelope_id, signing_url, session_id = criar_envelope_e_gerar_view(nome, email)
+
+        if not envelope_id or not signing_url or not session_id:
+            return jsonify({"error": "Falha ao criar envelope ou gerar link de assinatura"}), 500
+
+        return jsonify({
+            "session_id": session_id,
+            "envelope_id": envelope_id,
+            "signing_url": signing_url
+        }), 200
 
     except Exception as e:
         import traceback
-        tb = traceback.format_exc()
-        print("[ERRO FLASK gerar_link_assinatura_endpoint]", str(e))
-        print(tb)
-        return jsonify({"error": str(e), "trace": tb}), 500
-            
+        print("[ERRO /gerar_link_assinatura]", str(e))
+        print(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+        
 # -------------------------------
 # Redireciona para DocuSign
 # -------------------------------
@@ -510,6 +503,48 @@ def redirect_to_docusign(guid):
         print("[ERRO FLASK redirect_to_docusign]", str(e))
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/docusign_callback", methods=["GET"])
+def docusign_callback():
+    """
+    Callback do DocuSign após o usuário assinar ou sair.
+    O DocuSign retorna query params como: event, state, etc.
+    Vamos usar o session_id para buscar a sessão no Redis.
+    """
+    try:
+        event = request.args.get("event") or request.args.get("eventStatus")
+        session_id = request.args.get("state")  # usamos o state como nosso guid
+
+        print(f"[CALLBACK DOCUSIGN] Event={event}, session_id={session_id}")
+
+        if not session_id:
+            return "Session ID ausente no callback.", 400
+
+        sessao = buscar_sessao_redis(session_id)
+        if not sessao:
+            return "Sessão não encontrada ou expirada.", 404
+
+        envelope_id = sessao.get("envelope_id")
+        nome = sessao.get("nome")
+        email = sessao.get("email")
+
+        # Opcional: remover a sessão após callback
+        remover_sessao_redis(session_id)
+
+        # Aqui você pode decidir o que fazer:
+        # - Atualizar status do usuário no banco
+        # - Redirecionar para página de sucesso/erro
+        if event and event.lower() == "signing_complete":
+            return f"Assinatura concluída com sucesso! Envelope {envelope_id} para {nome} ({email})", 200
+        else:
+            return f"A assinatura foi encerrada com status: {event}", 200
+
+    except Exception as e:
+        import traceback
+        print("[ERRO /docusign_callback]", str(e))
+        print(traceback.format_exc())
+        return f"Erro interno: {str(e)}", 500
         
 # ---------------------------
 # Webhook Mercado Pago
@@ -574,6 +609,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
