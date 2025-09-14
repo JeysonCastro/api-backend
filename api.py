@@ -10,7 +10,11 @@ from typing import Optional, Dict, Any
 import traceback
 
 from flask import Flask, request, jsonify, redirect
-from docusign_esign import ApiClient, EnvelopesApi, RecipientViewRequest
+from docusign_esign import (
+    ApiClient, EnvelopesApi,
+    EnvelopeDefinition, Document, Signer, SignHere, Tabs, Recipients,
+    RecipientViewRequest
+)
 from supabase import create_client, Client
 import certifi
 import mercadopago
@@ -213,58 +217,58 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             expires_in=3600,
             scopes=["signature", "impersonation"]
         )
+        access_token = getattr(token_response, "access_token", None)
+        if not access_token:
+            raise Exception(f"Falha ao obter access_token: {token_response}")
 
-        # Extrai token corretamente
-        if hasattr(token_response, "access_token"):
-            access_token = token_response.access_token
-            expires_in = getattr(token_response, "expires_in", 3600)
-        elif isinstance(token_response, dict):
-            access_token = token_response.get("access_token")
-            expires_in = token_response.get("expires_in", 3600)
-        else:
-            raise Exception(f"Resposta de token inesperada: {token_response}")
+        # Aplica token
+        api_client.set_default_header("Authorization", f"Bearer {access_token}")
 
-        # Aplica token corretamente
-        api_client.set_access_token(access_token, expires_in)
+        # 4. Cria o documento
+        document = Document(
+            document_base64=pdf_b64,
+            name="Contrato.pdf",
+            file_extension="pdf",
+            document_id="1"
+        )
 
-        # 4. Cria envelope
-        envelope_definition = {
-            "emailSubject": "Assine seu contrato",
-            "documents": [{
-                "documentBase64": pdf_b64,
-                "name": "Contrato.pdf",
-                "fileExtension": "pdf",
-                "documentId": "1"
-            }],
-            "recipients": {
-                "signers": [{
-                    "email": email,
-                    "name": nome,
-                    "recipientId": "1",
-                    "clientUserId": client_user_id
-                }]
-            },
-            "status": "sent"
-        }
+        # 5. Cria o signer
+        signer = Signer(
+            email=email,
+            name=nome,
+            recipient_id="1",
+            client_user_id=client_user_id,
+            tabs=Tabs(sign_here_tabs=[SignHere(document_id="1", page_number="1", x_position="100", y_position="150")])
+        )
 
+        recipients = Recipients(signers=[signer])
+
+        # 6. Monta envelope
+        envelope_definition = EnvelopeDefinition(
+            email_subject="Assine seu contrato",
+            documents=[document],
+            recipients=recipients,
+            status="sent"
+        )
+
+        # 7. Cria envelope
         envelopes_api = EnvelopesApi(api_client)
-        envelope_summary = envelopes_api.create_envelope(DS_ACCOUNT_ID, envelope_definition)
+        envelope_summary = envelopes_api.create_envelope(
+            DS_ACCOUNT_ID,
+            envelope_definition=envelope_definition
+        )
 
-        # Extrai envelope_id de forma segura
-        envelope_id = getattr(envelope_summary, "envelope_id", None) \
-                      or getattr(envelope_summary, "envelopeId", None) \
-                      or (envelope_summary.get("envelopeId") if isinstance(envelope_summary, dict) else None)
-
+        envelope_id = getattr(envelope_summary, "envelope_id", None)
         if not envelope_id:
             raise Exception(f"Não foi possível obter envelope_id da resposta: {envelope_summary}")
 
         print(f"[DEBUG] Envelope criado com sucesso: {envelope_id}")
 
-        # 5. Cria session_id e salva no Redis
+        # 8. Cria session_id e salva sessão no Redis
         session_id = str(uuid.uuid4())
         salvar_sessao_redis(session_id, envelope_id, nome, email)
 
-        # 6. Gera link de assinatura
+        # 9. Cria recipient view (URL de assinatura)
         view_request = RecipientViewRequest(
             authentication_method="none",
             client_user_id=client_user_id,
@@ -273,13 +277,14 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             user_name=nome,
             email=email
         )
+
         view = envelopes_api.create_recipient_view(
-            DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request
+            DS_ACCOUNT_ID,
+            envelope_id,
+            recipient_view_request=view_request
         )
 
-        signing_url = getattr(view, "url", None) or (
-            view.get("url") if isinstance(view, dict) else None
-        )
+        signing_url = getattr(view, "url", None)
         if not signing_url:
             raise Exception(f"Não foi possível obter URL de assinatura da resposta: {view}")
 
@@ -288,7 +293,6 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
         return envelope_id, signing_url, session_id
 
     except Exception as e:
-        import traceback
         print("[ERRO DOCUSIGN criar_envelope_e_gerar_view]", str(e))
         print(traceback.format_exc())
         return None, None, None
@@ -612,6 +616,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
