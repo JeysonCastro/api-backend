@@ -192,8 +192,6 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
     Retorna (envelope_id, signing_url, session_id) ou (None, None, None) em caso de erro.
     """
     try:
-        import uuid
-
         # 1. Lê PDF fixo
         pdf_path = os.path.join(os.path.dirname(__file__), "contrato_padrao.pdf")
         if not os.path.exists(pdf_path):
@@ -215,14 +213,19 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             expires_in=3600,
             scopes=["signature", "impersonation"]
         )
-        access_token = (
-            token_response.get("access_token")
-            if isinstance(token_response, dict)
-            else getattr(token_response, "access_token", str(token_response))
-        )
 
-        # Aplica token
-        api_client.set_default_header("Authorization", f"Bearer {access_token}")
+        # Extrai token corretamente
+        if hasattr(token_response, "access_token"):
+            access_token = token_response.access_token
+            expires_in = getattr(token_response, "expires_in", 3600)
+        elif isinstance(token_response, dict):
+            access_token = token_response.get("access_token")
+            expires_in = token_response.get("expires_in", 3600)
+        else:
+            raise Exception(f"Resposta de token inesperada: {token_response}")
+
+        # Aplica token corretamente
+        api_client.set_access_token(access_token, expires_in)
 
         # 4. Cria envelope
         envelope_definition = {
@@ -247,7 +250,7 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
         envelopes_api = EnvelopesApi(api_client)
         envelope_summary = envelopes_api.create_envelope(DS_ACCOUNT_ID, envelope_definition)
 
-        # Extração robusta do envelope_id
+        # Extrai envelope_id de forma segura
         envelope_id = getattr(envelope_summary, "envelope_id", None) \
                       or getattr(envelope_summary, "envelopeId", None) \
                       or (envelope_summary.get("envelopeId") if isinstance(envelope_summary, dict) else None)
@@ -257,11 +260,11 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
 
         print(f"[DEBUG] Envelope criado com sucesso: {envelope_id}")
 
-        # 5. Cria session_id e salva sessão no Redis
+        # 5. Cria session_id e salva no Redis
         session_id = str(uuid.uuid4())
         salvar_sessao_redis(session_id, envelope_id, nome, email)
 
-        # 6. Gera link de assinatura embutida (recipient view)
+        # 6. Gera link de assinatura
         view_request = RecipientViewRequest(
             authentication_method="none",
             client_user_id=client_user_id,
@@ -609,6 +612,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
