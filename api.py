@@ -197,20 +197,51 @@ def obter_api_client():
     return api_client
 
 
-# 🔹 Cria envelope e já gera view
-def criar_envelope_e_gerar_view(nome, email):
+# ---------------------------
+# DocuSign: criar envelope + gerar recipient view (versão final)
+# ---------------------------
+def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
+    """
+    Cria envelope com o PDF fixo e já gera uma recipient view (URL de assinatura).
+    Retorna (envelope_id, signing_url, session_id) ou (None, None, None) em caso de erro.
+    Usa o Account ID numérico (DS_ACCOUNT_ID) nas chamadas.
+    """
     try:
-        # 1. Lê PDF fixo
+        # 1) lê PDF
         pdf_path = os.path.join(os.path.dirname(__file__), "contrato_padrao.pdf")
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF não encontrado em {pdf_path}")
         with open(pdf_path, "rb") as f:
             pdf_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        # 2. API client autenticado
-        api_client = obter_api_client()
+        # 2) prepara ApiClient
+        api_client = ApiClient()
+        api_client.set_base_path(DS_BASE_PATH)        # ex: "https://na2.docusign.net/restapi"
+        api_client.set_oauth_host_name(DS_AUTH_SERVER) # ex: "account.docusign.com"
 
-        # 3. Documento
+        # 3) request JWT token (retorno pode ser objeto com .access_token)
+        token_response = api_client.request_jwt_user_token(
+            client_id=DS_INTEGRATION_KEY,
+            user_id=DS_USER_ID,
+            oauth_host_name=DS_AUTH_SERVER,
+            private_key_bytes=DS_PRIVATE_KEY,
+            expires_in=3600,
+            scopes=["signature", "impersonation"]
+        )
+
+        access_token = None
+        if isinstance(token_response, dict):
+            access_token = token_response.get("access_token")
+        else:
+            access_token = getattr(token_response, "access_token", None)
+
+        if not access_token:
+            raise Exception(f"Falha ao obter access_token: {token_response}")
+
+        # 4) aplica header Authorization diretamente (compatível com a versão do SDK)
+        api_client.set_default_header("Authorization", f"Bearer {access_token}")
+
+        # 5) cria Document + Signer usando modelos do SDK (objetos)
         document = Document(
             document_base64=pdf_b64,
             name="Contrato.pdf",
@@ -218,17 +249,20 @@ def criar_envelope_e_gerar_view(nome, email):
             document_id="1"
         )
 
-        # 4. Session ID único (e será usado como client_user_id)
-        session_id = str(uuid.uuid4())
+        # posição do SignHere é exemplo — ajuste X/Y/página conforme seu PDF
+        sign_here = SignHere(
+            document_id="1",
+            page_number="1",
+            x_position="100",
+            y_position="150"
+        )
 
         signer = Signer(
             email=email,
             name=nome,
             recipient_id="1",
-            client_user_id=session_id,
-            tabs=Tabs(sign_here_tabs=[
-                SignHere(document_id="1", page_number="1", x_position="100", y_position="150")
-            ])
+            client_user_id=client_user_id,
+            tabs=Tabs(sign_here_tabs=[sign_here])
         )
 
         recipients = Recipients(signers=[signer])
@@ -240,38 +274,35 @@ def criar_envelope_e_gerar_view(nome, email):
             status="sent"
         )
 
+        # 6) cria envelope (USAR DS_ACCOUNT_ID numérico)
         envelopes_api = EnvelopesApi(api_client)
-        envelope_summary = envelopes_api.create_envelope(
-            DS_ACCOUNT_ID,
-            envelope_definition=envelope_definition
-        )
+        envelope_summary = envelopes_api.create_envelope(DS_ACCOUNT_ID, envelope_definition=envelope_definition)
 
-        envelope_id = getattr(envelope_summary, "envelope_id", None)
+        # 7) extrai envelope_id de forma segura
+        envelope_id = getattr(envelope_summary, "envelope_id", None) or getattr(envelope_summary, "envelopeId", None)
         if not envelope_id:
-            raise Exception(f"Não foi possível obter envelope_id: {envelope_summary}")
+            raise Exception(f"Não foi possível obter envelope_id da resposta: {envelope_summary}")
 
-        # 5. Salvar sessão (Redis)
+        # 8) cria session_id e salva no Redis
+        session_id = str(uuid.uuid4())
         salvar_sessao_redis(session_id, envelope_id, nome, email)
 
-        # 6. Recipient view request (usando o mesmo session_id!)
+        # 9) cria recipient view (embedded signing)
+        # OBS: usamos state/session_id no return_url para reconectar com nossa sessão Redis.
         view_request = RecipientViewRequest(
             authentication_method="none",
-            client_user_id=session_id,
+            client_user_id=client_user_id,
             recipient_id="1",
-            return_url=f"https://casadoar.ddns.net/docusign_callback?session_id={session_id}",
+            return_url=f"https://casadoar.ddns.net/docusign_callback?state={session_id}",
             user_name=nome,
             email=email
         )
 
-        view = envelopes_api.create_recipient_view(
-            DS_ACCOUNT_ID,
-            envelope_id,
-            recipient_view_request=view_request
-        )
+        view = envelopes_api.create_recipient_view(DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
 
-        signing_url = getattr(view, "url", None)
+        signing_url = getattr(view, "url", None) or (view.get("url") if isinstance(view, dict) else None)
         if not signing_url:
-            raise Exception(f"Não foi possível obter URL de assinatura: {view}")
+            raise Exception(f"Não foi possível obter URL de assinatura da resposta: {view}")
 
         return envelope_id, signing_url, session_id
 
@@ -281,30 +312,51 @@ def criar_envelope_e_gerar_view(nome, email):
         return None, None, None
 
 
-# 🔹 Apenas gerar uma recipient view de um envelope já existente
-def create_recipient_view_for_envelope(envelope_id, nome, email, session_id):
+def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id="1"):
+    """
+    Gera uma recipient view para um envelope existente.
+    Retorna a signing_url ou None.
+    """
     try:
-        api_client = obter_api_client()
-        envelopes_api = EnvelopesApi(api_client)
+        api_client = ApiClient()
+        api_client.set_base_path(DS_BASE_PATH)
+        api_client.set_oauth_host_name(DS_AUTH_SERVER)
 
+        token_response = api_client.request_jwt_user_token(
+            client_id=DS_INTEGRATION_KEY,
+            user_id=DS_USER_ID,
+            oauth_host_name=DS_AUTH_SERVER,
+            private_key_bytes=DS_PRIVATE_KEY,
+            expires_in=3600,
+            scopes=["signature", "impersonation"]
+        )
+
+        access_token = None
+        if isinstance(token_response, dict):
+            access_token = token_response.get("access_token")
+        else:
+            access_token = getattr(token_response, "access_token", None)
+
+        if not access_token:
+            raise Exception(f"Falha ao obter access_token: {token_response}")
+
+        api_client.set_default_header("Authorization", f"Bearer {access_token}")
+
+        envelopes_api = EnvelopesApi(api_client)
         view_request = RecipientViewRequest(
             authentication_method="none",
-            client_user_id=session_id,  # mesmo que foi usado ao criar o envelope
+            client_user_id=client_user_id,
             recipient_id="1",
-            return_url=f"https://casadoar.ddns.net/docusign_callback?session_id={session_id}",
+            return_url="https://casadoar.ddns.net/docusign_callback",
             user_name=nome,
             email=email
         )
 
-        view = envelopes_api.create_recipient_view(
-            DS_ACCOUNT_ID,
-            envelope_id,
-            recipient_view_request=view_request
-        )
+        view = envelopes_api.create_recipient_view(DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
+        signing_url = getattr(view, "url", None) or (view.get("url") if isinstance(view, dict) else None)
 
-        signing_url = getattr(view, "url", None)
         if not signing_url:
-            raise Exception(f"[ERRO] Não foi possível obter signing_url. Resposta: {view}")
+            raise Exception(f"Não foi possível obter signing_url. Resposta: {view}")
 
         return signing_url
 
@@ -587,6 +639,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
