@@ -438,9 +438,9 @@ def gerar_link_assinatura_endpoint():
 
     except Exception as e:
         import traceback
-        print("[ERRO FLASK gerar_link_assinatura_endpoint]", str(e))
-        print(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        erro = traceback.format_exc()
+        print("[ERRO FLASK gerar_link_assinatura_endpoint]", erro)
+        return jsonify({"error": erro}), 500
         
 # -------------------------------
 # Redireciona para DocuSign
