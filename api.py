@@ -37,7 +37,6 @@ DS_ACCOUNT_ID = os.getenv("DOCUSIGN_ACCOUNT_ID")
 with open(os.getenv("DOCUSIGN_PRIVATE_KEY_PATH"), "r") as key_file:
     DS_PRIVATE_KEY = key_file.read().encode("utf-8")
 
-
 # ---------------------------
 # Inicializações
 # ---------------------------
@@ -63,7 +62,6 @@ def _ensure_data_uri_png(b64_str: str) -> str:
     if not b64_str.startswith("data:image"):
         return f"data:image/png;base64,{b64_str}"
     return b64_str
-
 
 redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
@@ -104,9 +102,6 @@ def remover_sessao_redis(guid):
 
 def gerar_pix_mp(valor_centavos: int, email_cliente: str, nome_cliente: Optional[str] = None,
                  cpf_cliente: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """
-    Cria um pagamento PIX (Payment API) e retorna os dados do QR Code.
-    """
     try:
         valor = round(valor_centavos / 100.0, 2)
 
@@ -124,11 +119,6 @@ def gerar_pix_mp(valor_centavos: int, email_cliente: str, nome_cliente: Optional
         })
 
         resp = pagamento["response"]
-        # Campos importantes:
-        # - resp["id"]: id do pagamento (usar como "txid" interno)
-        # - resp["status"]: 'pending' até ser pago
-        # - resp["point_of_interaction"]["transaction_data"]["qr_code"]
-        # - resp["point_of_interaction"]["transaction_data"]["qr_code_base64"]
         poi = resp.get("point_of_interaction", {}) or {}
         txdata = poi.get("transaction_data", {}) or {}
 
@@ -148,16 +138,11 @@ def gerar_pix_mp(valor_centavos: int, email_cliente: str, nome_cliente: Optional
 
 def gerar_preferencia_cartao_mp(valor_centavos: int, email_cliente: str,
                                 titulo_item: str = "Pagamento Casa do Ar") -> Optional[Dict[str, Any]]:
-    """
-    Gera uma preferência do Checkout Pro com método de pagamento limitado a CARTÃO.
-    Retorna a URL (init_point) para redirecionamento em WebView/navegador.
-    """
     try:
         valor = round(valor_centavos / 100.0, 2)
-        # Limitando a cartão de crédito (exclui pix e boleto)
         payment_methods = {
             "excluded_payment_methods": [{"id": "pix"}, {"id": "bolbradesco"}],
-            "excluded_payment_types": [{"id": "ticket"}],  # exclui boleto
+            "excluded_payment_types": [{"id": "ticket"}],
             "installments": 12
         }
 
@@ -170,12 +155,11 @@ def gerar_preferencia_cartao_mp(valor_centavos: int, email_cliente: str,
             "payer": {"email": email_cliente},
             "payment_methods": payment_methods,
             "back_urls": {
-                # Use seu deep link registrado no AndroidManifest e no buildozer.spec
                 "success": "casadoar://pagamento/sucesso",
                 "failure": "casadoar://pagamento/falha",
                 "pending": "casadoar://pagamento/pendente"
             },
-            "auto_return": "approved"  # retorna automaticamente no sucesso
+            "auto_return": "approved"
         })
 
         return {
@@ -191,24 +175,17 @@ def gerar_preferencia_cartao_mp(valor_centavos: int, email_cliente: str,
 # ---------------------------
 
 def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
-    """
-    Cria envelope com o PDF fixo e já gera uma recipient view (URL de assinatura).
-    Retorna (envelope_id, signing_url, session_id) ou (None, None, None) em caso de erro.
-    """
     try:
-        # 1. Lê PDF fixo
         pdf_path = os.path.join(os.path.dirname(__file__), "contrato_padrao.pdf")
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF não encontrado em {pdf_path}")
         with open(pdf_path, "rb") as f:
             pdf_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        # 2. Configura cliente DocuSign
         api_client = ApiClient()
         api_client.set_base_path(DS_BASE_PATH)
         api_client.set_oauth_host_name(DS_AUTH_SERVER)
 
-        # 3. Autentica via JWT
         token_response = api_client.request_jwt_user_token(
             client_id=DS_INTEGRATION_KEY,
             user_id=DS_USER_ID,
@@ -221,10 +198,8 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
         if not access_token:
             raise Exception(f"Falha ao obter access_token: {token_response}")
 
-        # Aplica token
         api_client.set_default_header("Authorization", f"Bearer {access_token}")
 
-        # 4. Cria o documento
         document = Document(
             document_base64=pdf_b64,
             name="Contrato.pdf",
@@ -232,7 +207,6 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             document_id="1"
         )
 
-        # 5. Cria o signer
         signer = Signer(
             email=email,
             name=nome,
@@ -243,7 +217,6 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
 
         recipients = Recipients(signers=[signer])
 
-        # 6. Monta envelope
         envelope_definition = EnvelopeDefinition(
             email_subject="Assine seu contrato",
             documents=[document],
@@ -251,7 +224,6 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             status="sent"
         )
 
-        # 7. Cria envelope
         envelopes_api = EnvelopesApi(api_client)
         envelope_summary = envelopes_api.create_envelope(
             DS_ACCOUNT_ID,
@@ -262,13 +234,9 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
         if not envelope_id:
             raise Exception(f"Não foi possível obter envelope_id da resposta: {envelope_summary}")
 
-        print(f"[DEBUG] Envelope criado com sucesso: {envelope_id}")
-
-        # 8. Cria session_id e salva sessão no Redis
         session_id = str(uuid.uuid4())
         salvar_sessao_redis(session_id, envelope_id, nome, email)
 
-        # 9. Cria recipient view (URL de assinatura)
         view_request = RecipientViewRequest(
             authentication_method="none",
             client_user_id=client_user_id,
@@ -288,8 +256,6 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
         if not signing_url:
             raise Exception(f"Não foi possível obter URL de assinatura da resposta: {view}")
 
-        print(f"[DEBUG] URL de assinatura gerada: {signing_url}")
-
         return envelope_id, signing_url, session_id
 
     except Exception as e:
@@ -298,10 +264,6 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
         return None, None, None
 
 def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id="1"):
-    """
-    Se você já tem envelope_id, gera uma nova recipient view (URL) para abrir a assinatura.
-    Útil para reabrir uma assinatura sem recriar o envelope.
-    """
     try:
         api_client = ApiClient()
         api_client.set_base_path(DS_BASE_PATH)
@@ -315,8 +277,13 @@ def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id=
             expires_in=3600,
             scopes=["signature", "impersonation"]
         )
-        access_token = token_response.access_token
-        api_client.set_access_token(access_token)
+
+        # ✅ Correção aplicada aqui
+        access_token = getattr(token_response, "access_token", None)
+        if not access_token:
+            raise Exception(f"Falha ao obter access_token: {token_response}")
+
+        api_client.set_default_header("Authorization", f"Bearer {access_token}")
 
         envelopes_api = EnvelopesApi(api_client)
         view_request = RecipientViewRequest(
@@ -339,7 +306,6 @@ def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id=
         print("[ERRO DOCUSIGN create_recipient_view_for_envelope]", str(e))
         print(traceback.format_exc())
         return None
-
 
 # ---------------------------
 # Rotas
@@ -616,6 +582,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
