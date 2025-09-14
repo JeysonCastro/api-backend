@@ -428,7 +428,7 @@ def gerar_link_assinatura_endpoint():
 
         envelope_id, link = criar_envelope_e_gerar_view(dados["nome"], dados["email"])
         if not envelope_id or not link:
-            return jsonify({"error": erro}), 500
+            return jsonify({"error": "Falha ao criar envelope ou link de assinatura"}), 500
 
         # Salva sessão real no Redis — agora com envelope_id válido
         guid = str(uuid.uuid4())
@@ -534,6 +534,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
