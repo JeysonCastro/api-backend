@@ -8,6 +8,8 @@ import base64
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import traceback
+import time
+import requests
 
 from flask import Flask, request, jsonify, redirect
 from docusign_esign import (
@@ -29,14 +31,68 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 MP_ACCESS_TOKEN = os.environ.get("MP_ACCESS_TOKEN")
 MP_PUBLIC_KEY = os.environ.get("MP_PUBLIC_KEY")
-DS_BASE_PATH = os.getenv("DS_BASE_PATH", "https://demo.docusign.net")
-DS_AUTH_SERVER = os.getenv("DS_AUTH_SERVER", "account-d.docusign.com")
+DS_BASE_PATH = os.getenv("DS_BASE_PATH", "https://nd2.docusign.net/restapi")
+DS_AUTH_SERVER = os.getenv("DS_AUTH_SERVER", "account.docusign.com")
 DS_INTEGRATION_KEY = os.getenv("DOCUSIGN_INTEGRATION_KEY")
 DS_USER_ID = os.getenv("DOCUSIGN_USER_ID")
 DS_ACCOUNT_ID = os.getenv("DOCUSIGN_ACCOUNT_ID")
 with open(os.getenv("DOCUSIGN_PRIVATE_KEY_PATH"), "r") as key_file:
     DS_PRIVATE_KEY = key_file.read().encode("utf-8")
+DOCUSIGN_CLIENT_ID = os.getenv("DOCUSIGN_CLIENT_ID") or DS_INTEGRATION_KEY
+DOCUSIGN_CLIENT_SECRET = os.getenv("DOCUSIGN_CLIENT_SECRET")
 
+DOCUSIGN_REDIRECT_URI = os.getenv("DOCUSIGN_REDIRECT_URI", "https://casadoar.ddns.net")
+DOCUSIGN_TOKEN_URL = "https://account.docusign.com/oauth/token"
+
+# Redis (ajuste host/porta se necessário)
+r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+
+
+def get_access_token():
+    """
+    Recupera o access_token do Redis, renova se estiver expirado,
+    usando o refresh_token salvo.
+    """
+    try:
+        access_token = r.get("docusign_access_token")
+        expires_at = r.get("docusign_token_expires_at")
+
+        # Se já existe e ainda não expirou → retorna
+        if access_token and expires_at and float(expires_at) > time.time():
+            return access_token
+
+        # Caso contrário, tenta refresh
+        refresh_token = r.get("docusign_refresh_token")
+        if not refresh_token:
+            raise Exception("Nenhum refresh_token encontrado no Redis. Usuário precisa fazer login novamente.")
+
+        payload = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": DOCUSIGN_CLIENT_ID,
+            "client_secret": DOCUSIGN_CLIENT_SECRET,
+        }
+
+        response = requests.post(DOCUSIGN_TOKEN_URL, data=payload)
+        if response.status_code != 200:
+            raise Exception(f"Falha ao renovar token: {response.text}")
+
+        data = response.json()
+        new_access_token = data["access_token"]
+        new_refresh_token = data.get("refresh_token", refresh_token)  # pode vir atualizado
+        expires_in = data.get("expires_in", 3600)
+
+        # Salva no Redis
+        r.set("docusign_access_token", new_access_token)
+        r.set("docusign_refresh_token", new_refresh_token)
+        r.set("docusign_token_expires_at", str(time.time() + expires_in - 60))  # margem de 1 min
+
+        return new_access_token
+
+    except Exception as e:
+        print("[ERRO get_access_token]", str(e))
+        print(traceback.format_exc())
+        return None
 # ---------------------------
 # Inicializações
 # ---------------------------
@@ -204,7 +260,7 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
     """
     Cria envelope com o PDF fixo e já gera uma recipient view (URL de assinatura).
     Retorna (envelope_id, signing_url, session_id) ou (None, None, None) em caso de erro.
-    Usa o Account ID numérico (DS_ACCOUNT_ID) nas chamadas.
+    Usa Authorization Code flow (token/refresh via Redis).
     """
     try:
         # 1) lê PDF
@@ -214,34 +270,13 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
         with open(pdf_path, "rb") as f:
             pdf_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        # 2) prepara ApiClient
+        # 2) pega token válido via Redis
+        token = get_access_token()
         api_client = ApiClient()
-        api_client.set_base_path(DS_BASE_PATH)        # ex: "https://na2.docusign.net/restapi"
-        api_client.set_oauth_host_name(DS_AUTH_SERVER) # ex: "account.docusign.com"
+        api_client.set_base_path("https://demo.docusign.net/restapi")
+        api_client.set_default_header("Authorization", f"Bearer {token}")
 
-        # 3) request JWT token (retorno pode ser objeto com .access_token)
-        token_response = api_client.request_jwt_user_token(
-            client_id=DS_INTEGRATION_KEY,
-            user_id=DS_USER_ID,
-            oauth_host_name=DS_AUTH_SERVER,
-            private_key_bytes=DS_PRIVATE_KEY,
-            expires_in=3600,
-            scopes=["signature", "impersonation"]
-        )
-
-        access_token = None
-        if isinstance(token_response, dict):
-            access_token = token_response.get("access_token")
-        else:
-            access_token = getattr(token_response, "access_token", None)
-
-        if not access_token:
-            raise Exception(f"Falha ao obter access_token: {token_response}")
-
-        # 4) aplica header Authorization diretamente (compatível com a versão do SDK)
-        api_client.set_default_header("Authorization", f"Bearer {access_token}")
-
-        # 5) cria Document + Signer usando modelos do SDK (objetos)
+        # 3) cria documento
         document = Document(
             document_base64=pdf_b64,
             name="Contrato.pdf",
@@ -249,7 +284,7 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             document_id="1"
         )
 
-        # posição do SignHere é exemplo — ajuste X/Y/página conforme seu PDF
+        # 4) cria aba de assinatura (ajuste posição no seu PDF)
         sign_here = SignHere(
             document_id="1",
             page_number="1",
@@ -257,6 +292,7 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             y_position="150"
         )
 
+        # 5) cria signatário
         signer = Signer(
             email=email,
             name=nome,
@@ -274,21 +310,23 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             status="sent"
         )
 
-        # 6) cria envelope (USAR DS_ACCOUNT_ID numérico)
+        # 6) cria envelope
         envelopes_api = EnvelopesApi(api_client)
-        envelope_summary = envelopes_api.create_envelope(DS_ACCOUNT_ID, envelope_definition=envelope_definition)
+        envelope_summary = envelopes_api.create_envelope(
+            DOCUSIGN_ACCOUNT_ID,
+            envelope_definition=envelope_definition
+        )
 
-        # 7) extrai envelope_id de forma segura
-        envelope_id = getattr(envelope_summary, "envelope_id", None) or getattr(envelope_summary, "envelopeId", None)
+        envelope_id = getattr(envelope_summary, "envelope_id", None) \
+                      or getattr(envelope_summary, "envelopeId", None)
         if not envelope_id:
             raise Exception(f"Não foi possível obter envelope_id da resposta: {envelope_summary}")
 
-        # 8) cria session_id e salva no Redis
+        # 7) cria session_id e salva no Redis
         session_id = str(uuid.uuid4())
         salvar_sessao_redis(session_id, envelope_id, nome, email)
 
-        # 9) cria recipient view (embedded signing)
-        # OBS: usamos state/session_id no return_url para reconectar com nossa sessão Redis.
+        # 8) cria recipient view (embedded signing)
         view_request = RecipientViewRequest(
             authentication_method="none",
             client_user_id=client_user_id,
@@ -298,9 +336,9 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
             email=email
         )
 
-        view = envelopes_api.create_recipient_view(DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
-
+        view = envelopes_api.create_recipient_view(DOCUSIGN_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
         signing_url = getattr(view, "url", None) or (view.get("url") if isinstance(view, dict) else None)
+
         if not signing_url:
             raise Exception(f"Não foi possível obter URL de assinatura da resposta: {view}")
 
@@ -315,34 +353,19 @@ def criar_envelope_e_gerar_view(nome, email, client_user_id="1"):
 def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id="1"):
     """
     Gera uma recipient view para um envelope existente.
+    Usa o fluxo Authorization Code + Refresh Token salvo no Redis.
     Retorna a signing_url ou None.
     """
     try:
+        # 1) Pega access_token válido
+        token = get_access_token()
+
+        # 2) Prepara ApiClient com token
         api_client = ApiClient()
-        api_client.set_base_path(DS_BASE_PATH)
-        api_client.set_oauth_host_name(DS_AUTH_SERVER)
+        api_client.set_base_path("https://demo.docusign.net/restapi")
+        api_client.set_default_header("Authorization", f"Bearer {token}")
 
-        token_response = api_client.request_jwt_user_token(
-            client_id=DS_INTEGRATION_KEY,
-            user_id=DS_USER_ID,
-            oauth_host_name=DS_AUTH_SERVER,
-            private_key_bytes=DS_PRIVATE_KEY,
-            expires_in=3600,
-            scopes=["signature", "impersonation"]
-        )
-
-        access_token = None
-        if isinstance(token_response, dict):
-            access_token = token_response.get("access_token")
-        else:
-            access_token = getattr(token_response, "access_token", None)
-
-        if not access_token:
-            raise Exception(f"Falha ao obter access_token: {token_response}")
-
-        api_client.set_default_header("Authorization", f"Bearer {access_token}")
-
-        envelopes_api = EnvelopesApi(api_client)
+        # 3) Cria request da recipient view
         view_request = RecipientViewRequest(
             authentication_method="none",
             client_user_id=client_user_id,
@@ -352,7 +375,10 @@ def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id=
             email=email
         )
 
-        view = envelopes_api.create_recipient_view(DS_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
+        # 4) Cria recipient view
+        envelopes_api = EnvelopesApi(api_client)
+        view = envelopes_api.create_recipient_view(DOCUSIGN_ACCOUNT_ID, envelope_id, recipient_view_request=view_request)
+
         signing_url = getattr(view, "url", None) or (view.get("url") if isinstance(view, dict) else None)
 
         if not signing_url:
@@ -364,6 +390,7 @@ def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id=
         print("[ERRO DOCUSIGN create_recipient_view_for_envelope]", str(e))
         print(traceback.format_exc())
         return None
+        
 # ---------------------------
 # Rotas
 # ---------------------------
@@ -535,8 +562,8 @@ def redirect_to_docusign(guid):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/docusign_callback", methods=["GET"])
-def docusign_callback():
+@app.route("/docusign_sign_callback", methods=["GET"])
+def docusign_sign_callback():
     """
     Callback do DocuSign após o usuário assinar ou sair.
     O DocuSign retorna query params como: event, state, etc.
@@ -575,6 +602,68 @@ def docusign_callback():
         print("[ERRO /docusign_callback]", str(e))
         print(traceback.format_exc())
         return f"Erro interno: {str(e)}", 500
+
+@app.route("/callback")
+def docusign_callback():
+    """
+    Captura o "code" enviado pelo DocuSign, troca por access_token + refresh_token
+    e salva no Redis.
+    """
+    code = request.args.get("code")
+    if not code:
+        return jsonify({"error": "Authorization code não encontrado"}), 400
+
+    payload = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": DOCUSIGN_CLIENT_ID,
+        "client_secret": DOCUSIGN_CLIENT_SECRET,
+        "redirect_uri": DOCUSIGN_REDIRECT_URI,
+    }
+
+    response = requests.post(DOCUSIGN_TOKEN_URL, data=payload)
+    if response.status_code != 200:
+        return jsonify({"error": "Falha ao trocar código por token", "details": response.text}), 400
+
+    data = response.json()
+    access_token = data["access_token"]
+    refresh_token = data.get("refresh_token")
+    expires_in = data.get("expires_in", 3600)
+
+    # Salva no Redis
+    r.set("docusign_access_token", access_token)
+    r.set("docusign_refresh_token", refresh_token)
+    r.set("docusign_token_expires_at", str(time.time() + expires_in - 60))  # margem de 1 min
+
+    # Redireciona para página de sucesso (pode ser sua UI ou uma página simples)
+    return redirect("/success")  # crie essa rota ou troque pelo seu frontend
+
+@app.route("/success")
+def success():
+    """
+    Página simples de confirmação de login com DocuSign.
+    """
+    import time
+
+    access_token = r.get("docusign_access_token")
+    expires_at = r.get("docusign_token_expires_at")
+
+    if not access_token:
+        return "<h2 style='color:red;'>❌ Nenhum token encontrado. Tente novamente o login.</h2>"
+
+    expira_em = int(float(expires_at) - time.time()) if expires_at else None
+
+    return f"""
+    <html>
+      <head><title>DocuSign Autenticado</title></head>
+      <body style="font-family: Arial, sans-serif; text-align: center; margin-top: 50px;">
+        <h2 style="color: green;">✅ Autenticação com DocuSign concluída com sucesso!</h2>
+        <p><b>Access Token:</b> {access_token[:20]}... (oculto)</p>
+        <p><b>Expira em:</b> {expira_em} segundos</p>
+        <p>Agora você já pode usar a API do DocuSign no backend 🚀</p>
+      </body>
+    </html>
+    """
         
 # ---------------------------
 # Webhook Mercado Pago
@@ -639,35 +728,4 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
