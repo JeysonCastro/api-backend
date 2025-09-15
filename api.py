@@ -52,7 +52,7 @@ r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
 
 app = Flask(__name__)
 CORS(app)
-
+PDF_PATH = "/home/jeysincastrin/api-backend/contrato_padrao.pdf"
 # --------------------------------------------------------
 # JWT Flow - geração e cache de token
 # --------------------------------------------------------
@@ -730,6 +730,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
