@@ -519,12 +519,21 @@ def docusign_criar():
         data = request.get_json()
         nome = data.get("nome")
         email = data.get("email")
-        document_base64 = data.get("document_base64")
 
-        if not nome or not email or not document_base64:
-            return jsonify({"erro": "Campos obrigatórios: nome, email, document_base64"}), 400
+        if not nome or not email:
+            return jsonify({"erro": "Campos obrigatórios: nome e email"}), 400
 
-        envelope_id, signing_url, session_id = criar_envelope_e_gerar_view(nome, email, document_base64)
+        # 🔹 Lê o contrato fixo da VM e converte para Base64
+        if not os.path.exists(PDF_PATH):
+            return jsonify({"erro": f"Arquivo PDF não encontrado em {PDF_PATH}"}), 500
+
+        with open(PDF_PATH, "rb") as f:
+            document_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+        # 🔹 Cria envelope no DocuSign
+        envelope_id, signing_url, session_id = criar_envelope_e_gerar_view(
+            nome, email, document_base64
+        )
 
         if not envelope_id:
             return jsonify({"erro": "Falha ao criar envelope"}), 500
@@ -721,5 +730,6 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
