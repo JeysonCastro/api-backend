@@ -32,20 +32,15 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 MP_ACCESS_TOKEN = os.environ.get("MP_ACCESS_TOKEN")
 MP_PUBLIC_KEY = os.environ.get("MP_PUBLIC_KEY")
-DS_BASE_PATH = os.getenv("DS_BASE_PATH", "https://n2.docusign.net/restapi")
-DS_AUTH_SERVER = os.getenv("DS_AUTH_SERVER", "account.docusign.com")
 DS_INTEGRATION_KEY = os.getenv("DOCUSIGN_INTEGRATION_KEY")
 DS_USER_ID = os.getenv("DOCUSIGN_USER_ID")
-DS_ACCOUNT_ID = os.getenv("DOCUSIGN_ACCOUNT_ID")
-with open(os.getenv("DOCUSIGN_PRIVATE_KEY_PATH"), "r") as key_file:
-    DS_PRIVATE_KEY = key_file.read().encode("utf-8")
-DOCUSIGN_CLIENT_ID = os.getenv("DOCUSIGN_CLIENT_ID") or DS_INTEGRATION_KEY
-DOCUSIGN_CLIENT_SECRET = os.getenv("DOCUSIGN_CLIENT_SECRET")
+DS_ACCOUNT_ID = os.getenv("DOCUSIGN_ACCOUNT_ID")  # fallback, mas tentaremos buscar dinamicamente
+DS_AUTH_SERVER = os.getenv("DS_AUTH_SERVER", "account.docusign.com")
+PDF_PATH = "/home/jeysincastrin/api-backend/contrato_padrao.pdf"
 
-DOCUSIGN_REDIRECT_URI = os.getenv("DOCUSIGN_REDIRECT_URI", "https://casadoar.ddns.net")
-DOCUSIGN_TOKEN_URL = "https://account.docusign.com/oauth/token"
-
-# Redis (ajuste host/porta se necessário)
+with open(os.getenv("DOCUSIGN_PRIVATE_KEY_PATH"), "rb") as key_file:
+    DS_PRIVATE_KEY = key_file.read()
+    
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 mp = mercadopago.SDK(MP_ACCESS_TOKEN)
 
@@ -57,16 +52,9 @@ PDF_PATH = "/home/jeysincastrin/api-backend/contrato_padrao.pdf"
 # --------------------------------------------------------
 # JWT Flow - geração e cache de token
 # --------------------------------------------------------
-def get_jwt_access_token() -> str:
+def obter_api_client_jwt():
     try:
-        token = r.get("docusign_access_token")
-        expira_em = r.get("docusign_token_expires_at")
-
-        if token and expira_em and float(expira_em) > time.time():
-            return token  # já é string no Redis
-
         api_client = ApiClient()
-        api_client.set_base_path(DS_BASE_PATH)
         api_client.set_oauth_host_name(DS_AUTH_SERVER)
 
         token_response = api_client.request_jwt_user_token(
@@ -77,23 +65,23 @@ def get_jwt_access_token() -> str:
             expires_in=3600,
             scopes=["signature", "impersonation"]
         )
-
-        access_token = token_response.access_token
+        access_token = getattr(token_response, "access_token", None)
         if not access_token:
-            raise Exception("Falha ao gerar access_token JWT")
+            raise Exception(f"Falha JWT: {token_response}")
 
-        # guarda no Redis
-        r.set("docusign_access_token", access_token)
-        r.set("docusign_token_expires_at", str(time.time() + 3600 - 60))
+        # Pega account_id + base_uri corretos
+        user_info = api_client.get_user_info(access_token)
+        account = user_info.accounts[0]
+        base_path = account.base_uri + "/restapi"
+        account_id = account.account_id
 
-        return access_token
+        api_client.set_base_path(base_path)
+        api_client.set_default_header("Authorization", f"Bearer {access_token}")
 
+        return api_client, access_token, account_id
     except Exception as e:
-        print("[ERRO get_jwt_access_token]", str(e))
-        print(traceback.format_exc())
-        return None
-
-
+        print("[ERRO obter_api_client_jwt]", str(e))
+        raise
 
 # ---------------------------
 # Helpers
@@ -209,49 +197,35 @@ def gerar_preferencia_cartao_mp(valor_centavos: int, email_cliente: str,
         print(f"[MP][CARD] Erro: {e}")
         return None
 
-# ---------------------------
-# DocuSign: criar envelope + gerar recipient view
-# ---------------------------
-
-# 🔹 Função auxiliar para autenticar
-def obter_api_client() -> ApiClient:
-    access_token = get_jwt_access_token()
-    if not access_token:
-        raise Exception("Não foi possível gerar access_token via JWT")
-
-    api_client = ApiClient()
-    api_client.set_base_path(DS_BASE_PATH)
-    api_client.set_default_header("Authorization", f"Bearer {access_token}")
-    return api_client
-
 
 
 # ---------------------------
 # DocuSign: criar envelope + gerar recipient view (versão final)
 # ---------------------------
-def criar_envelope_e_gerar_view(signer_name, signer_email, document_base64):
+def criar_envelope_e_gerar_view(signer_name, signer_email):
     try:
-        api_client = obter_api_client()
+        api_client, access_token, account_id = obter_api_client_jwt()
         envelopes_api = EnvelopesApi(api_client)
 
-        # Documento
+        # Documento fixo do servidor
+        with open(PDF_PATH, "rb") as f:
+            doc_base64 = base64.b64encode(f.read()).decode("utf-8")
+
         document = Document(
-            document_base64=document_base64,
-            name="Contrato",
+            document_base64=doc_base64,
+            name="Contrato Padrão",
             file_extension="pdf",
             document_id="1"
         )
 
-        # Signatário
         signer = Signer(
             email=signer_email,
             name=signer_name,
             recipient_id="1",
             routing_order="1",
-            client_user_id="1234"  # Identificador único no teu app
+            client_user_id="1234"  # necessário para embedded signing
         )
 
-        # Aba de assinatura
         sign_here = SignHere(
             document_id="1",
             page_number="1",
@@ -263,20 +237,17 @@ def criar_envelope_e_gerar_view(signer_name, signer_email, document_base64):
 
         signer.tabs = Tabs(sign_here_tabs=[sign_here])
 
-        # Envelope
         envelope_definition = EnvelopeDefinition(
-            email_subject="Por favor, assine este documento",
+            email_subject="Assine o contrato",
             documents=[document],
             recipients=Recipients(signers=[signer]),
             status="sent"
         )
 
-        # Criar envelope
-        results = envelopes_api.create_envelope(DS_ACCOUNT_ID, envelope_definition=envelope_definition)
+        results = envelopes_api.create_envelope(account_id, envelope_definition=envelope_definition)
         envelope_id = results.envelope_id
 
-        # Gerar URL de assinatura embutida
-        recipient_view_request = RecipientViewRequest(
+        view_request = RecipientViewRequest(
             authentication_method="none",
             client_user_id="1234",
             recipient_id="1",
@@ -285,24 +256,15 @@ def criar_envelope_e_gerar_view(signer_name, signer_email, document_base64):
             email=signer_email
         )
 
-        view = envelopes_api.create_recipient_view(
-            DS_ACCOUNT_ID, envelope_id, recipient_view_request=recipient_view_request
-        )
-        signing_url = view.url
+        results = envelopes_api.create_recipient_view(account_id, envelope_id, recipient_view_request=view_request)
 
-        # Gerar session_id para poder retomar depois
-        session_id = str(uuid.uuid4())
-        salvar_sessao_redis(session_id, envelope_id, signer_name, signer_email)
-
-        return envelope_id, signing_url, session_id
-
+        return envelope_id, results.url, None
+    except ApiException as ex:
+        print("[ERRO criar_envelope_e_gerar_view]", ex.status, ex.body)
+        return None, None, None
     except Exception as e:
         print("[ERRO criar_envelope_e_gerar_view]", str(e))
-        if hasattr(e, 'body'):
-            print("Detalhes do erro DocuSign:", e.body)
-        print(traceback.format_exc())
         return None, None, None
-
 
 def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id="1234"):
     try:
@@ -528,23 +490,15 @@ def redirect_to_docusign(guid):
 @app.route("/docusign/criar", methods=["POST"])
 def docusign_criar():
     try:
-        data = request.get_json()
-        signer_name = data.get("nome")
+        data = request.json
         signer_email = data.get("email")
+        signer_name = data.get("nome")
 
-        if not signer_name or not signer_email:
-            return jsonify({"error": "Campos obrigatórios ausentes: nome, email"}), 400
+        if not signer_email or not signer_name:
+            return jsonify({"error": "Campos obrigatórios ausentes"}), 400
 
-        # 🔹 Lê o contrato fixo da VM
-        if not os.path.exists(PDF_PATH):
-            return jsonify({"error": f"Arquivo PDF não encontrado em {PDF_PATH}"}), 500
-
-        with open(PDF_PATH, "rb") as f:
-            document_base64 = base64.b64encode(f.read()).decode("utf-8")
-
-        # 🔹 Cria envelope no DocuSign
         envelope_id, signing_url, session_id = criar_envelope_e_gerar_view(
-            signer_name, signer_email, document_base64
+            signer_name, signer_email
         )
 
         if not envelope_id:
@@ -554,11 +508,9 @@ def docusign_criar():
             "envelope_id": envelope_id,
             "signing_url": signing_url,
             "session_id": session_id
-        }), 200
-
+        })
     except Exception as e:
-        logging.error("[ERRO criar_envelope_e_gerar_view] %s", str(e))
-        logging.error(traceback.format_exc())
+        print("[ERRO /docusign/criar]", str(e))
         return jsonify({"error": str(e)}), 500
 
 @app.route("/docusign/resume", methods=["POST"])
@@ -741,6 +693,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
