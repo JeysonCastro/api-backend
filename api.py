@@ -557,8 +557,8 @@ def docusign_criar():
         }), 200
 
     except Exception as e:
-        print("[ERRO /docusign/criar]", str(e))
-        print(traceback.format_exc())
+        logging.error("[ERRO criar_envelope_e_gerar_view] %s", str(e))
+        logging.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 @app.route("/docusign/resume", methods=["POST"])
@@ -741,6 +741,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
