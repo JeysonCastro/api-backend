@@ -234,6 +234,7 @@ def criar_envelope_e_gerar_view(signer_name, signer_email, document_base64):
         api_client = obter_api_client()
         envelopes_api = EnvelopesApi(api_client)
 
+        # Documento
         document = Document(
             document_base64=document_base64,
             name="Contrato",
@@ -241,14 +242,16 @@ def criar_envelope_e_gerar_view(signer_name, signer_email, document_base64):
             document_id="1"
         )
 
+        # Signatário
         signer = Signer(
             email=signer_email,
             name=signer_name,
             recipient_id="1",
             routing_order="1",
-            client_user_id="1234"
+            client_user_id="1234"  # Identificador único no teu app
         )
 
+        # Aba de assinatura
         sign_here = SignHere(
             document_id="1",
             page_number="1",
@@ -260,6 +263,7 @@ def criar_envelope_e_gerar_view(signer_name, signer_email, document_base64):
 
         signer.tabs = Tabs(sign_here_tabs=[sign_here])
 
+        # Envelope
         envelope_definition = EnvelopeDefinition(
             email_subject="Por favor, assine este documento",
             documents=[document],
@@ -267,9 +271,11 @@ def criar_envelope_e_gerar_view(signer_name, signer_email, document_base64):
             status="sent"
         )
 
+        # Criar envelope
         results = envelopes_api.create_envelope(DS_ACCOUNT_ID, envelope_definition=envelope_definition)
         envelope_id = results.envelope_id
 
+        # Gerar URL de assinatura embutida
         recipient_view_request = RecipientViewRequest(
             authentication_method="none",
             client_user_id="1234",
@@ -279,9 +285,12 @@ def criar_envelope_e_gerar_view(signer_name, signer_email, document_base64):
             email=signer_email
         )
 
-        view = envelopes_api.create_recipient_view(DS_ACCOUNT_ID, envelope_id, recipient_view_request=recipient_view_request)
+        view = envelopes_api.create_recipient_view(
+            DS_ACCOUNT_ID, envelope_id, recipient_view_request=recipient_view_request
+        )
         signing_url = view.url
 
+        # Gerar session_id para poder retomar depois
         session_id = str(uuid.uuid4())
         salvar_sessao_redis(session_id, envelope_id, signer_name, signer_email)
 
@@ -289,6 +298,8 @@ def criar_envelope_e_gerar_view(signer_name, signer_email, document_base64):
 
     except Exception as e:
         print("[ERRO criar_envelope_e_gerar_view]", str(e))
+        if hasattr(e, 'body'):
+            print("Detalhes do erro DocuSign:", e.body)
         print(traceback.format_exc())
         return None, None, None
 
@@ -516,28 +527,22 @@ def redirect_to_docusign(guid):
 
 @app.route("/docusign/criar", methods=["POST"])
 def docusign_criar():
-    try:
-        data = request.get_json()
-        nome = data.get("nome")
-        email = data.get("email")
+     try:
+        data = request.json
+        signer_email = data.get("email")
+        signer_name = data.get("name")
+        document_base64 = data.get("document")
 
-        if not nome or not email:
-            return jsonify({"erro": "Campos obrigatórios: nome e email"}), 400
+        if not signer_email or not signer_name or not document_base64:
+            return jsonify({"error": "Campos obrigatórios ausentes"}), 400
 
-        # 🔹 Lê o contrato fixo da VM e converte para Base64
-        if not os.path.exists(PDF_PATH):
-            return jsonify({"erro": f"Arquivo PDF não encontrado em {PDF_PATH}"}), 500
-
-        with open(PDF_PATH, "rb") as f:
-            document_base64 = base64.b64encode(f.read()).decode("utf-8")
-
-        # 🔹 Cria envelope no DocuSign
+        # Criar envelope diretamente (usa DS_ACCOUNT_ID global)
         envelope_id, signing_url, session_id = criar_envelope_e_gerar_view(
-            nome, email, document_base64
+            signer_name, signer_email, document_base64
         )
 
         if not envelope_id:
-            return jsonify({"erro": "Falha ao criar envelope"}), 500
+            return jsonify({"error": "Falha ao criar envelope"}), 500
 
         return jsonify({
             "envelope_id": envelope_id,
@@ -546,9 +551,9 @@ def docusign_criar():
         })
 
     except Exception as e:
-        print("[ERRO /docusign/criar]", str(e))
+        print("[ERRO /envelope]", str(e))
         print(traceback.format_exc())
-        return jsonify({"erro": str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/docusign/resume", methods=["POST"])
@@ -731,6 +736,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
