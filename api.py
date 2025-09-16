@@ -528,15 +528,21 @@ def redirect_to_docusign(guid):
 @app.route("/docusign/criar", methods=["POST"])
 def docusign_criar():
     try:
-        data = request.json
+        data = request.get_json()
+        signer_name = data.get("nome")
         signer_email = data.get("email")
-        signer_name = data.get("name")
-        document_base64 = data.get("document")
 
-        if not signer_email or not signer_name or not document_base64:
-            return jsonify({"error": "Campos obrigatórios ausentes"}), 400
+        if not signer_name or not signer_email:
+            return jsonify({"error": "Campos obrigatórios ausentes: nome, email"}), 400
 
-        # Criar envelope diretamente (usa DS_ACCOUNT_ID global)
+        # 🔹 Lê o contrato fixo da VM
+        if not os.path.exists(PDF_PATH):
+            return jsonify({"error": f"Arquivo PDF não encontrado em {PDF_PATH}"}), 500
+
+        with open(PDF_PATH, "rb") as f:
+            document_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+        # 🔹 Cria envelope no DocuSign
         envelope_id, signing_url, session_id = criar_envelope_e_gerar_view(
             signer_name, signer_email, document_base64
         )
@@ -735,6 +741,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
