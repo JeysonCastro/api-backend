@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any
 import traceback
 import time
 import requests
+from flask_cors import CORS
 
 from flask import Flask, request, jsonify, redirect
 from docusign_esign import (
@@ -730,6 +731,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
