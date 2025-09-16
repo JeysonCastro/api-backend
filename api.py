@@ -16,7 +16,7 @@ from flask import Flask, request, jsonify, redirect
 from docusign_esign import (
     ApiClient, EnvelopesApi,
     EnvelopeDefinition, Document, Signer, SignHere, Tabs, Recipients,
-    RecipientViewRequest
+    RecipientViewRequest, ApiException
 )
 from supabase import create_client, Client
 import certifi
@@ -693,6 +693,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
