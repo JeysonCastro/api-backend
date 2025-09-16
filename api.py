@@ -527,7 +527,7 @@ def redirect_to_docusign(guid):
 
 @app.route("/docusign/criar", methods=["POST"])
 def docusign_criar():
-     try:
+    try:
         data = request.json
         signer_email = data.get("email")
         signer_name = data.get("name")
@@ -548,12 +548,12 @@ def docusign_criar():
             "envelope_id": envelope_id,
             "signing_url": signing_url,
             "session_id": session_id
-        })
+        }), 200
+
     except Exception as e:
-        print("[ERRO /envelope]", str(e))
+        print("[ERRO /docusign/criar]", str(e))
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/docusign/resume", methods=["POST"])
 def docusign_resume():
@@ -735,6 +735,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
