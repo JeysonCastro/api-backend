@@ -248,7 +248,7 @@ def criar_envelope_e_gerar_view(signer_name, signer_email):
         envelope_id = results.envelope_id
 
         view_request = RecipientViewRequest(
-            authentication_method="none",
+            authentication_method="email",
             client_user_id="1234",
             recipient_id="1",
             return_url="https://casadoar.ddns.net/docusign_sign_callback",
@@ -272,7 +272,7 @@ def create_recipient_view_for_envelope(envelope_id, nome, email, client_user_id=
         envelopes_api = EnvelopesApi(api_client)
 
         view_request = RecipientViewRequest(
-            authentication_method="none",
+            authentication_method="email",
             client_user_id=client_user_id,
             recipient_id="1",
             return_url="https://casadoar.ddns.net/docusign_sign_callback",
@@ -693,6 +693,7 @@ def webhook_mercadopago():
 if __name__ == "__main__":
     # Em produção na VM do Google, execute com gunicorn/uvicorn e HTTPS atrás de um proxy.
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
 
