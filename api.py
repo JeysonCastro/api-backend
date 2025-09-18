@@ -37,32 +37,38 @@ def home():
     """
 
 # -------------------------------------------------
-# PIX
+# PIX - Criar cobrança
 # -------------------------------------------------
 @app.route("/criar_cobranca_pix", methods=["POST"])
 def criar_cobranca_pix():
     try:
-        dados = request.json
+        dados = request.json or {}
         descricao = dados.get("descricao", "Pagamento Casa do Ar")
-        valor_centavos = int(dados["valor_centavos"])
-        email = dados["email"]
+        valor_centavos = int(dados.get("valor_centavos", 100))
+        email = dados.get("email", "cliente_teste@example.com")
 
-        # 👉 Força R$1,00 para teste
+        # Força R$1,00 em ambiente de teste
         if valor_centavos > 100:
             valor_centavos = 100
 
-        pagamento = sdk.payment().create({
+        body = {
             "transaction_amount": valor_centavos / 100,
             "description": descricao,
             "payment_method_id": "pix",
             "payer": {"email": email}
-        })
+        }
 
-        resposta = pagamento["response"]
+        pagamento = sdk.payment().create(body)
+        print("🔍 PIX resposta bruta:", pagamento)
+
+        resposta = pagamento.get("response", {})
+
+        if "id" not in resposta:
+            return jsonify({"erro": "Falha ao criar PIX", "detalhes": resposta}), 400
 
         txdata = resposta.get("point_of_interaction", {}).get("transaction_data", {})
 
-        # Salvar no Supabase
+        # Salva no Supabase
         dados_pagamento = {
             "descricao": descricao,
             "valor_centavos": valor_centavos,
@@ -79,44 +85,53 @@ def criar_cobranca_pix():
             "qr_code": txdata.get("qr_code"),
             "qr_code_base64": txdata.get("qr_code_base64")
         })
+
     except Exception as e:
-        print("[ERRO PIX]", str(e))
+        print("[ERRO PIX]", e)
         return jsonify({"erro": str(e)}), 500
 
 # -------------------------------------------------
-# Cartão (Checkout Pro)
+# Cartão - Criar preferência (Checkout Pro)
 # -------------------------------------------------
 @app.route("/criar_preferencia_cartao", methods=["POST"])
 def criar_preferencia_cartao():
     try:
-        dados = request.json
-        descricao = dados["descricao"]
-        valor_centavos = int(dados["valor_centavos"])
-        email = dados["email"]
+        dados = request.json or {}
+        descricao = dados.get("descricao", "Pagamento Casa do Ar")
+        valor_centavos = int(dados.get("valor_centavos", 100))
+        email = dados.get("email", "cliente_teste@example.com")
 
-        # 👉 Força R$1,00 para teste
+        # Força R$1,00 em ambiente de teste
         if valor_centavos > 100:
             valor_centavos = 100
 
-        preferencia = sdk.preference().create({
-            "items": [{
-                "title": descricao,
-                "quantity": 1,
-                "currency_id": "BRL",
-                "unit_price": valor_centavos / 100
-            }],
+        body = {
+            "items": [
+                {
+                    "title": descricao,
+                    "quantity": 1,
+                    "unit_price": valor_centavos / 100,
+                    "currency_id": "BRL"
+                }
+            ],
             "payer": {"email": email},
             "back_urls": {
-                "success": "https://casadoar.ddns.net/pagamento_sucesso",
-                "failure": "https://casadoar.ddns.net/pagamento_falhou",
-                "pending": "https://casadoar.ddns.net/pagamento_pendente"
+                "success": "casadoar://pagamento/sucesso",
+                "failure": "casadoar://pagamento/falha",
+                "pending": "casadoar://pagamento/pendente",
             },
             "auto_return": "approved"
-        })
+        }
 
-        resposta = preferencia["response"]
+        preferencia = sdk.preference().create(body)
+        print("🔍 Cartão resposta bruta:", preferencia)
 
-        # Salvar no Supabase
+        resposta = preferencia.get("response", {})
+
+        if "id" not in resposta:
+            return jsonify({"erro": "Falha ao criar preferência", "detalhes": resposta}), 400
+
+        # Salva no Supabase
         dados_pagamento = {
             "descricao": descricao,
             "valor_centavos": valor_centavos,
@@ -129,11 +144,11 @@ def criar_preferencia_cartao():
 
         return jsonify({
             "id": resposta.get("id"),
-            "init_point": resposta.get("init_point"),
-            "sandbox_init_point": resposta.get("sandbox_init_point")
+            "init_point": resposta.get("init_point")
         })
+
     except Exception as e:
-        print("[ERRO CARTAO]", str(e))
+        print("[ERRO CARTÃO]", e)
         return jsonify({"erro": str(e)}), 500
 
 # -------------------------------------------------
@@ -165,3 +180,4 @@ def webhook_mp():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
