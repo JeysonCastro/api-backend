@@ -28,6 +28,35 @@ def salvar_pagamento_supabase(dados_pagamento: dict):
     except Exception as e:
         print("Erro ao salvar pagamento no Supabase:", e)
 
+
+@app.route("/")
+def home():
+    return """
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <title>Casa do Ar API</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                background: #f9f9f9;
+                color: #333;
+                text-align: center;
+                padding-top: 100px;
+            }
+            h1 {
+                color: #ff6600;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>🚀 Casa do Ar API</h1>
+        <p>O servidor Flask está funcionando corretamente.</p>
+    </body>
+    </html>
+    """
+    
 # -------------------------------------------------
 # Rotas de Pagamento
 # -------------------------------------------------
@@ -151,3 +180,4 @@ def webhook_mp():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
