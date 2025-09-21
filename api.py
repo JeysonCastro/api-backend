@@ -154,7 +154,7 @@ def criar_cobranca_pix_endpoint():
             raise Exception(f"Falha ao gerar PIX no MP: {resp_mp}")
 
         nova_inst = {
-            "cliente_id": dados["cliente_id"],
+            "user_data": dados["user_data"],
             "ar_id": dados["ar_id"],
             "data_instalacao_id": dados["data_id"],
             "status": "AGUARDANDO_PAGAMENTO",
@@ -190,7 +190,7 @@ def criar_link_cartao_endpoint():
             raise Exception(f"Erro ao criar preferência MP: {pref}")
 
         nova_inst = {
-            "cliente_id": dados["cliente_id"],
+            "user_data": dados["user_data"],
             "ar_id": dados["ar_id"],
             "data_instalacao_id": dados["data_id"],
             "status": "AGUARDANDO_PAGAMENTO",
@@ -280,3 +280,4 @@ def webhook_mercadopago():
 # ---------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
+
