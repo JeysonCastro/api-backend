@@ -230,21 +230,16 @@ def get_instalacao_status(instalacao_id: int):
         return jsonify({"error": str(e)}), 500
 
 
-# WEBHOOK MP
-@app.route("/webhook/mercadopago", methods=["POST", "GET"])
-def webhook_mercadopago():
+eventos_processados = {}
+
+def processar_webhook_mp(evento):
     try:
-        if request.method == "GET":
-            return jsonify({"status": "ok"}), 200
-
-        evento = request.get_json(force=True) or {}
-        print(f"[WEBHOOK MP RAW] {json.dumps(evento, indent=2)}")
-
         data_obj = evento.get("data", {}) or {}
         payment_id = data_obj.get("id")
 
         if not payment_id:
-            return jsonify({"status": "sem payment_id"}), 200
+            print("[WEBHOOK MP] Ignorado: sem payment_id")
+            return
 
         pagamento = sdk.payment().get(payment_id)
         resp = pagamento.get("response", {}) or {}
@@ -252,6 +247,35 @@ def webhook_mercadopago():
         order = resp.get("order") or {}
         pref_id = order.get("id")
 
+        print(f"[WEBHOOK MP] processando payment_id={payment_id} status={status}")
+
+        # 🔒 Evita processar duplicados
+        chave = f"{payment_id}-{status}"
+        if chave in eventos_processados:
+            print(f"[WEBHOOK MP] Ignorado (duplicado): {chave}")
+            return
+        eventos_processados[chave] = datetime.utcnow()
+
+        # 🔧 Limpa cache antigo (mantém os últimos 100 eventos)
+        if len(eventos_processados) > 100:
+            eventos_processados.pop(next(iter(eventos_processados)))
+
+        # 🔹 Busca status atual no Supabase
+        result = (
+            supabase.table("instalacoes")
+            .select("status")
+            .eq("txid_efi", str(payment_id))
+            .execute()
+        )
+
+        status_atual = result.data[0]["status"] if result.data else None
+
+        # 🔒 Impede downgrade: se já está PAGO, não muda para FALHA
+        if status_atual == "PAGO" and status in ("rejected", "cancelled"):
+            print(f"[WEBHOOK MP] Ignorado downgrade: {payment_id} já PAGO")
+            return
+
+        # 🟢 Atualiza status no banco
         if status == "approved":
             supabase.table("instalacoes").update(
                 {"status": "PAGO"}
@@ -267,17 +291,34 @@ def webhook_mercadopago():
                 {"status": "FALHA"}
             ).eq("txid_efi", str(payment_id)).execute()
 
-        print(f"[WEBHOOK MP] payment_id={payment_id} status={status}")
+        print(f"[WEBHOOK MP] Finalizado: payment_id={payment_id} → {status}")
+
+    except Exception as e:
+        print(f"[WEBHOOK MP] ERRO interno: {e}")
+
+
+@app.route("/webhook/mercadopago", methods=["POST", "GET"])
+def webhook_mercadopago():
+    try:
+        if request.method == "GET":
+            return jsonify({"status": "ok"}), 200
+
+        evento = request.get_json(force=True) or {}
+        print(f"[WEBHOOK MP RAW] {json.dumps(evento, indent=2)}")
+
+        # Processa em thread para não travar o worker
+        threading.Thread(target=processar_webhook_mp, args=(evento,)).start()
+
+        # Retorna rápido para o Mercado Pago
         return jsonify({"ok": True}), 200
 
     except Exception as e:
-        print(f"[WEBHOOK MP] ERRO: {e}")
+        print(f"[WEBHOOK MP] ERRO geral: {e}")
         return jsonify({"error": str(e)}), 500
-
-
 # ---------------------------
 # Execução local
 # ---------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
