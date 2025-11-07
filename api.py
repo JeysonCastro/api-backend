@@ -1,5 +1,6 @@
 import os
 import json
+import threading
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -320,5 +321,6 @@ def webhook_mercadopago():
 # ---------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
+
 
 
